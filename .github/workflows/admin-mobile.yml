@@ -5,7 +5,7 @@ on:
       mode:
         description: Catalog stage to run
         type: choice
-        options: [all, sitemaps, metadata]
+        options: [all, sitemaps, metadata, release_dates]
         default: all
       seconds:
         description: Optional runtime in seconds (60-21600; default six hours)
@@ -33,7 +33,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Start sitemap browser
-        if: inputs.mode != 'metadata'
+        if: inputs.mode != 'metadata' && inputs.mode != 'release_dates'
         run: |
           docker pull ghcr.io/flaresolverr/flaresolverr:latest
           docker run -d --name mobile-solver --shm-size=1g --tmpfs /tmp:exec,mode=1777,size=1G -p 127.0.0.1:8191:8191 -e LOG_LEVEL=INFO ghcr.io/flaresolverr/flaresolverr:latest
@@ -56,7 +56,7 @@ jobs:
           path: work-plan.json
           if-no-files-found: error
       - name: Remove sitemap browser
-        if: always() && inputs.mode != 'metadata'
+        if: always() && inputs.mode != 'metadata' && inputs.mode != 'release_dates'
         run: docker rm -f mobile-solver || true
   mobile:
     name: Mobile worker ${{ matrix.worker }}
@@ -77,7 +77,7 @@ jobs:
         with:
           name: ${{ needs.prepare.outputs.artifact }}
       - name: Start sitemap browser
-        if: inputs.mode != 'metadata'
+        if: inputs.mode != 'metadata' && inputs.mode != 'release_dates'
         run: |
           docker pull ghcr.io/flaresolverr/flaresolverr:latest
           docker run -d --name mobile-solver --shm-size=1g --tmpfs /tmp:exec,mode=1777,size=1G -p 127.0.0.1:8191:8191 -e LOG_LEVEL=INFO ghcr.io/flaresolverr/flaresolverr:latest
@@ -95,7 +95,7 @@ jobs:
           METADATA_BATCHES: ${{ inputs.metadata_batches }}
         run: python parallel_catalog.py work --provider mobile --worker "${{ matrix.worker }}" --seconds "$SYNC_SECONDS" --metadata-batches "$METADATA_BATCHES"
       - name: Remove sitemap browser
-        if: always() && inputs.mode != 'metadata'
+        if: always() && inputs.mode != 'metadata' && inputs.mode != 'release_dates'
         run: docker rm -f mobile-solver || true
   finalize:
     name: Save shared Mobile checkpoint
