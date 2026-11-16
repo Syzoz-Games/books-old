@@ -36,7 +36,7 @@ def normalize(appid,data):
  c=data.get('common') or {};name=c.get('name');kind=str(c.get('type','unknown')).lower()
  if not name:return None
  associations=c.get('associations') or {};developers=[x.get('name','') for x in associations.values() if isinstance(x,dict) and x.get('type')=='developer'] if isinstance(associations,dict) else []
- return {'appid':int(appid),'name':str(name)[:500],'type':kind,'release_ts':timestamp(c.get('steam_release_date')),'original_release_ts':None,'coming_soon':c.get('releasestate')=='prerelease','windows':'windows' in str(c.get('oslist','')).lower(),'developer':', '.join(developers)[:500],'icon':'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/'+str(appid)+'/header.jpg','restricted':bool(data.get('_missing_token',False)),'is_free':None,'installs':None,'installs_max':None,'installs_estimated':None,'installs_source':None,'installs_checked_at':None}
+ return {'appid':int(appid),'name':str(name)[:500],'type':kind,'release_ts':timestamp(c.get('steam_release_date')),'original_release_ts':None,'coming_soon':c.get('releasestate')=='prerelease','windows':'windows' in str(c.get('oslist','')).lower(),'developer':', '.join(developers)[:500],'icon':'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/'+str(appid)+'/header.jpg','restricted':bool(data.get('_missing_token',False)),'is_free':None,'installs':None,'installs_max':None,'installs_estimated':None,'installs_source':None,'installs_checked_at':None,'rating':None,'rating_count':None,'rating_source':None,'rating_checked_at':None}
 def store_dates(records,deadline=None):
  # Commerce applies to every named game, including records already dated by PICS.
  # Only an explicit StoreBrowse boolean classifies free/paid; missing is unknown.
@@ -79,7 +79,12 @@ def owner_fields(appid,data,checked_at):
  low,high=(int(value.replace(',','')) for value in match.groups())
  if not 0<=low<=high<=9007199254740991:raise ValueError('Invalid ownership bounds')
  if type(checked_at) is not int or not 1<=checked_at<=9007199254740991:raise ValueError('Invalid ownership observation time')
- return {'appid':appid,'installs':low,'installs_max':high,'installs_estimated':True,'installs_source':'steamspy','installs_checked_at':checked_at}
+ record={'appid':appid,'installs':low,'installs_max':high,'installs_estimated':True,'installs_source':'steamspy','installs_checked_at':checked_at}
+ positive=data.get('positive');negative=data.get('negative')
+ # A missing/malformed review response must not discard a valid owner estimate.
+ if type(positive) is int and type(negative) is int and 0<=positive<=9007199254740991 and 0<=negative<=9007199254740991 and 0<positive+negative<=9007199254740991:
+  record.update(rating=5*positive/(positive+negative),rating_count=positive+negative,rating_source='steamspy_reviews',rating_checked_at=checked_at)
+ return record
 def owner_phase(tr,state,deadline):
  # Server selects due saved games; no ever-growing pending-AppID checkpoint.
  if deadline-time.monotonic()<=1:return {'collected':0,'failed':0,'deferred':0}
