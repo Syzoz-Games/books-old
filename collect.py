@@ -19,7 +19,7 @@ class Transport:
    if action=='batch':
     with (self.local/'batches.jsonl').open('a') as f:f.write(json.dumps(data)+'\n')
    state=kw.get('state',old);temp=p.with_suffix('.tmp');temp.write_text(json.dumps(state));temp.replace(p);return state
-  req=urllib.request.Request(self.url,json.dumps(data).encode(),{'Content-Type':'application/json','X-Steam-Token':self.token})
+  req=urllib.request.Request(self.url,wire_json(data),{'Content-Type':'application/json','X-Steam-Token':self.token})
   for attempt in range(3):
    try:
     with urllib.request.build_opener(NoRedirect).open(req,timeout=90) as r:return json.load(r)
@@ -29,6 +29,33 @@ class Transport:
    except OSError:
     if attempt==2:raise
    time.sleep(2*(attempt+1))
+def wire_json(value):
+ return json.dumps(value,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode('utf-8')
+def send_catalog_batch(tr,previous,state,records,details,audit,max_body=5500000,max_details=4000000,max_detail=2000000):
+ # Validate and partition before sending. Only the last chunk commits the new
+ # scan cursor/counters; earlier writes replay safely after an interrupted send.
+ byid={row['appid']:row for row in details}
+ if len(byid)!=len(details) or not set(byid).issubset({row['appid'] for row in records}):raise ValueError('Unmatched or duplicate detail document')
+ interim=dict(previous)
+ for key in ('run_id','status','phase','heartbeat','batch_from','batch_to'):
+  if key in state:interim[key]=state[key]
+ base=max(len(wire_json(dict(action='batch',state=checkpoint,records=[],details=[],audit=audit))) for checkpoint in (interim,state))
+ chunks=[];rows=[];docs=[];body_size=base;detail_size=2
+ for row in records:
+  detail=byid.get(row['appid']);row_bytes=len(wire_json(row));doc_bytes=len(wire_json(detail)) if detail is not None else 0
+  # PHP validators may escape non-ASCII/slashes when measuring decoded docs.
+  measured=len(json.dumps(detail,separators=(',',':'),ensure_ascii=True).replace('/','\\/').encode()) if detail is not None else 0
+  if measured>max_detail:raise ValueError('One detail document exceeds the receiver limit')
+  extra=row_bytes+(1 if rows else 0)+doc_bytes+(1 if detail is not None and docs else 0)
+  extra_detail=measured+(1 if detail is not None and docs else 0)
+  if rows and (body_size+extra>max_body or detail_size+extra_detail>max_details):
+   chunks.append((rows,docs));rows=[];docs=[];body_size=base;detail_size=2;extra=row_bytes+doc_bytes;extra_detail=measured
+  if body_size+extra>max_body or detail_size+extra_detail>max_details:raise ValueError('One catalog record exceeds the receiver limit')
+  rows.append(row);body_size+=extra;detail_size+=extra_detail
+  if detail is not None:docs.append(detail)
+ if rows or not chunks:chunks.append((rows,docs))
+ for index,(rows,docs) in enumerate(chunks):tr.call('batch',state=state if index==len(chunks)-1 else interim,records=rows,details=docs,audit=audit)
+ return len(chunks)
 def initial():return {'cursor':1,'scan_pass':1,'change_number':0,'pending_changes':[],'change_target':0,'failed_batches':[],'scanned_ids':0,'unknown_ids':0,'restricted_records':0,'transport_failures':0,'status':'ready'}
 def timestamp(v):
  try:n=int(v);return n if 0<n<MAX_APP_ID else None
@@ -84,6 +111,82 @@ def normalize(appid,data):
  version=None;depots=data.get('depots');branches=depots.get('branches') if isinstance(depots,dict) else None;public=branches.get('public') if isinstance(branches,dict) else None;build=public.get('buildid') if isinstance(public,dict) else None
  if (type(build) is int or isinstance(build,str) and 1<=len(build)<=16 and build.isascii() and build.isdecimal()) and 0<int(build)<=9007199254740991:version='Build '+str(int(build))
  return {'appid':int(appid),'name':str(name)[:500],'type':kind,'release_ts':timestamp(c.get('steam_release_date')),'original_release_ts':None,'coming_soon':c.get('releasestate')=='prerelease','windows':'windows' in str(c.get('oslist','')).lower(),'developer':', '.join(developers)[:500],'icon':icon,'restricted':bool(data.get('_missing_token',False)),'is_free':None,'installs':None,'installs_max':None,'installs_estimated':None,'installs_source':None,'installs_checked_at':None,'rating':None,'rating_count':None,'rating_source':None,'rating_checked_at':None,'category':None,'tags':None,'version':version,'description':None,'price':None,'ads_supported':None,'iap':None,'architectures':None,**public_update(data),**public_size(data)}
+STORE_TAG_NAMES=None
+STORE_DATA_REQUEST={'include_release':True,'include_basic_info':True,'include_assets':True,'include_platforms':True,'include_reviews':True,'include_tag_count':20,'include_screenshots':True,'include_trailers':True,'include_full_description':True,'include_best_purchase_option':True}
+def parse_store_tags(document):
+ response=document.get('response') if isinstance(document,dict) else None;tags=response.get('tags') if isinstance(response,dict) else None
+ if not isinstance(tags,list) or len(tags)>10000:raise ValueError('Invalid tag dictionary')
+ names={}
+ for row in tags:
+  if not isinstance(row,dict):raise ValueError('Invalid tag dictionary entry')
+  tagid=row.get('tagid');name=row.get('name')
+  if type(tagid) is not int or not 1<=tagid<=MAX_APP_ID or not isinstance(name,str) or not 1<=len(name.strip())<=80 or any(unicodedata.category(c).startswith('C') for c in name):raise ValueError('Invalid tag dictionary identity')
+  if tagid in names and names[tagid]!=name.strip():raise ValueError('Conflicting tag names')
+  names[tagid]=name.strip()
+ return names
+def store_tag_names(deadline=None):
+ global STORE_TAG_NAMES
+ if STORE_TAG_NAMES is not None:return STORE_TAG_NAMES
+ STORE_TAG_NAMES={};remaining=15 if deadline is None else deadline-time.monotonic()
+ if remaining<=1:return STORE_TAG_NAMES
+ try:
+  url='https://api.steampowered.com/IStoreService/GetTagList/v1/?'+urllib.parse.urlencode({'input_json':json.dumps({'language':'english'})})
+  timeout=min(15,remaining)
+  with Timeout(timeout,OSError('Tag dictionary timed out')):
+   with urllib.request.urlopen(url,timeout=timeout) as response:raw=response.read(1000001)
+  if len(raw)>1000000:raise ValueError('Tag dictionary too large')
+  STORE_TAG_NAMES=parse_store_tags(json.loads(raw))
+ except urllib.error.HTTPError as error:error.close()
+ except (OSError,ValueError):pass
+ return STORE_TAG_NAMES
+def store_json_fields(item,names,checked_at):
+ out={};reviews=item.get('reviews') if isinstance(item.get('reviews'),dict) else {};summary=reviews.get('summary_filtered')
+ if isinstance(summary,dict):
+  count=summary.get('review_count');percent=summary.get('percent_positive')
+  if type(count) is int and 0<count<=9007199254740991 and type(percent) is int and 0<=percent<=100:out.update(rating=5*percent/100,rating_count=count,rating_source='steam_store_summary',rating_checked_at=checked_at)
+ ids=item.get('tagids')
+ if not isinstance(ids,list) or not ids:
+  tags=item.get('tags');ids=[row.get('tagid') for row in tags if isinstance(row,dict)] if isinstance(tags,list) else []
+ labels=[];seen=set()
+ for tagid in ids:
+  label=names.get(tagid) if type(tagid) is int else None
+  if isinstance(label,str) and label.casefold() not in seen:labels.append(label);seen.add(label.casefold())
+  if len(labels)==20:break
+ if labels:out.update(category=labels[0],tags=labels)
+ return out
+def bbcode_text(value):
+ if not isinstance(value,str):return ''
+ value=re.sub(r'\[(?:img|video|previewyoutube)(?:=[^\]]*)?\].*?\[/(?:img|video|previewyoutube)\]','',value,flags=re.I|re.S)
+ value=re.sub(r'\[/?(?:h[1-6]|p|list|olist|quote)(?:=[^\]]*)?\]','\n',value,flags=re.I).replace('[*]','\n• ')
+ value=re.sub(r'\[/?[a-z][a-z0-9_]*(?:=[^\]]*)?\]','',value,flags=re.I)
+ return re.sub(r'\n[ \t]*\n(?:[ \t]*\n)+','\n\n',value).strip()
+def store_asset(path):
+ if not isinstance(path,str) or not path.startswith('steam/apps/') or '://' in path or '..' in path:return None
+ return 'https://shared.fastly.steamstatic.com/store_item_assets/'+path
+def store_detail_json(record,item,checked_at):
+ appid=record['appid'];basic=item.get('basic_info') if isinstance(item.get('basic_info'),dict) else {};release=item.get('release') if isinstance(item.get('release'),dict) else {};assets=item.get('assets') if isinstance(item.get('assets'),dict) else {}
+ screenshots=item.get('screenshots') if isinstance(item.get('screenshots'),dict) else {};shots=[]
+ for row in screenshots.get('all_ages_screenshots',[])+screenshots.get('mature_content_screenshots',[]):
+  filename=row.get('filename') if isinstance(row,dict) else None
+  if isinstance(filename,str) and filename.startswith('steam/apps/'+str(appid)+'/') and (url:=store_asset(filename)) and url not in shots:shots.append(url)
+ trailer_data=item.get('trailers') if isinstance(item.get('trailers'),dict) else {};trailers=[]
+ for kind in ('highlights','other_trailers'):
+  for row in trailer_data.get(kind,[]):
+   if not isinstance(row,dict):continue
+   trailer={'id':row.get('trailer_id'),'name':row.get('trailer_name'),'highlight':kind=='highlights'};fmt=row.get('trailer_url_format','');query=urllib.parse.urlsplit(fmt).query if isinstance(fmt,str) else ''
+   thumb=row.get('screenshot_medium') or row.get('screenshot_full')
+   if isinstance(fmt,str) and isinstance(thumb,str):trailer['thumbnail']=store_asset(fmt.replace('${FILENAME}',thumb))
+   for video in row.get('adaptive_trailers',[]):
+    path=video.get('cdn_path') if isinstance(video,dict) else None;encoding=video.get('encoding') if isinstance(video,dict) else None
+    if encoding in ('hls_h264','dash_h264','dash_av1') and isinstance(path,str) and path.startswith(str(appid)+'/') and '..' not in path and '://' not in path:trailer[encoding]='https://video.akamai.steamstatic.com/store_trailers/'+path+('?' +query if query else '')
+   if any(key in trailer for key in ('hls_h264','dash_h264','dash_av1')):trailers.append(trailer)
+ summary=(item.get('reviews') or {}).get('summary_filtered',{}) if isinstance(item.get('reviews'),dict) else {};platforms=item.get('platforms') if isinstance(item.get('platforms'),dict) else {};fmt=assets.get('asset_url_format');header=assets.get('header')
+ label=release.get('custom_release_date_message') or release.get('coming_soon_display')
+ if not label and record.get('release_ts'):label=datetime.fromtimestamp(record['release_ts'],timezone.utc).strftime('%b %d, %Y')
+ return {'schema':1,'appid':appid,'is_free':record.get('is_free'),'short_description':basic.get('short_description'),'description':bbcode_text(item.get('full_description_bbcode')) or record.get('description') or '', 'genres':[],'categories':['In-App Purchases'] if record.get('iap') is True else [],'screenshots':shots,'trailers':trailers,'release_label':label,'release_ts':record.get('release_ts'),'original_release_ts':record.get('original_release_ts'),'checked_at':checked_at,'platforms':{target:platforms[source] for source,target in [('windows','windows'),('mac','mac'),('steamos_linux','linux')] if type(platforms.get(source)) is bool},'publishers':[row['name'] for row in basic.get('publishers',[]) if isinstance(row,dict) and isinstance(row.get('name'),str)],'developers':[row['name'] for row in basic.get('developers',[]) if isinstance(row,dict) and isinstance(row.get('name'),str)],'country':'US','store_url':'https://store.steampowered.com/app/'+str(appid)+'/','source':'Steam Store JSON','header_image':store_asset(fmt.replace('${FILENAME}',header)) if isinstance(fmt,str) and isinstance(header,str) else None,'reviews':{key:summary.get(key) for key in ('review_count','percent_positive','review_score','review_score_label')}}
+def owner_estimates(record):
+ return {key:record[key] for key in ('appid','installs','installs_max','installs_estimated','installs_source','installs_checked_at')}
+
 def store_free_status(appid,deadline=None):
  # Optional protobuf-field absence alone does not prove a paid game. Only an
  # explicit boolean from this matching successful public listing may fill it.
@@ -101,12 +204,12 @@ def store_free_status(appid,deadline=None):
   error.close();return None
  except (OSError,ValueError):return None
  return None
-def store_dates(records,deadline=None):
+def store_dates(records,deadline=None,tag_names=None,include_details=False):
  # Commerce applies to every named game, including records already dated by PICS.
  # Missing StoreBrowse flags use a bounded explicit Store-listing fallback.
- games=[r for r in records if r['type']=='game']
+ games=[r for r in records if r['type']=='game'];details=[]
  for start in range(0,len(games),100):
-  rows=games[start:start+100];payload={'ids':[{'appid':r['appid']} for r in rows],'context':{'language':'english','country_code':'US'},'data_request':{'include_release':True,'include_basic_info':True,'include_assets':True}}
+  rows=games[start:start+100];payload={'ids':[{'appid':r['appid']} for r in rows],'context':{'language':'english','country_code':'US'},'data_request':dict(STORE_DATA_REQUEST)}
   remaining=25 if deadline is None else deadline-time.monotonic()
   if remaining<=1:
    for r in games[start:]:r['store_retry']=True
@@ -141,10 +244,15 @@ def store_dates(records,deadline=None):
     if not str(r.get('icon') or '').endswith('.ico') and isinstance(image_hash,str) and len(image_hash)==40 and all(x in '0123456789abcdef' for x in image_hash.lower()):r['icon']='https://cdn.akamai.steamstatic.com/steamcommunity/public/images/apps/'+str(r['appid'])+'/'+image_hash.lower()+'.jpg'
     developer_rows=basic.get('developers');developers=', '.join(x['name'] for x in developer_rows if isinstance(x,dict) and isinstance(x.get('name'),str))[:500] if isinstance(developer_rows,list) else ''
     if developers:r['developer']=developers
+    if any(key in a for key in ('reviews','tagids','tags')):
+     if tag_names is None:tag_names=store_tag_names(deadline)
+     r.update(store_json_fields(a,tag_names,int(time.time())))
+    if include_details:details.append(store_detail_json(r,a,int(time.time())))
   except (OSError,ValueError):
    for r in rows:r['store_retry']=True
   if deadline is None:time.sleep(.5)
   elif deadline-time.monotonic()>.5:time.sleep(.5)
+ return details
 def owner_fields(appid,data,checked_at):
  # Shared installs field deliberately carries the LOWER owner estimate, never
  # an exact download count, a midpoint, concurrent players, or a revenue proxy.
@@ -201,7 +309,7 @@ def owner_phase(tr,state,deadline):
    with Timeout(timeout,OSError('Ownership request timed out')):
     with urllib.request.urlopen(url,timeout=timeout) as response:raw=response.read(1000001)
    if len(raw)>1000000:raise ValueError('Ownership response too large')
-   checked_at=int(time.time());record=owner_fields(appid,json.loads(raw),checked_at)
+   checked_at=int(time.time());record=owner_estimates(owner_fields(appid,json.loads(raw),checked_at))
    records.append(record);games.append({'package':'steam:'+str(appid),'revision':checked_at,'points':[{'observed_at':checked_at,'total_installs':record['installs'],'period':1}]})
   except urllib.error.HTTPError as error:
    failed.append(appid)
@@ -249,13 +357,13 @@ def main():
    try:
     with Timeout(min(65,remaining),RuntimeError('PICS batch timed out')):info=client.get_product_info(apps=ids)
     if not isinstance(info,dict) or 'apps' not in info:raise RuntimeError('Incomplete PICS response')
-    apps=info.get('apps') or {};records=[r for i,a in apps.items() if (r:=normalize(i,a))];store_dates(records,deadline=catalog_deadline)
+    apps=info.get('apps') or {};records=[r for i,a in apps.items() if (r:=normalize(i,a))];details=store_dates(records,deadline=catalog_deadline,include_details=True)
     returned={int(i) for i in apps};unknown=[i for i in ids if i not in returned];unnamed=[int(i) for i,a in apps.items() if not (a.get('common') or {}).get('name')]
     if kind=='scan':state['cursor']=max(ids)+1;state['scanned_ids']+=len(ids);state['unknown_ids']+=len(unknown);state['restricted_records']+=len(unnamed)
     elif kind=='changes':state['pending_changes']=state['pending_changes'][len(ids):]
     # Unknown/restricted outcomes are audit data, never successful catalog records.
     audit=base64.b64encode(gzip.compress(json.dumps({'unknown':unknown,'unnamed':unnamed}).encode())).decode()
-    state['heartbeat']=int(time.time());uploading=True;tr.call('batch',state=state,records=records,audit=audit)
+    state['heartbeat']=int(time.time());uploading=True;send_catalog_batch(tr,previous,state,records,details,audit)
     print(json.dumps({'phase':kind,'from':min(ids),'to':max(ids),'named':len(records),'games':sum(r['type']=='game' for r in records),'unknown':len(unknown),'unnamed':len(unnamed),'next_id':state['cursor']}),flush=True)
    except Exception as e:
     # Never swallow a failed server checkpoint: replay the last saved batch next run.
