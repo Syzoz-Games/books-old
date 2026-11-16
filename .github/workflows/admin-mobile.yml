@@ -8,7 +8,7 @@ on:
         options: [all, sitemaps, metadata]
         default: all
       seconds:
-        description: Optional seconds (metadata up to 21300, other modes up to 1800)
+        description: Optional runtime in seconds (60-21600; default six hours)
         type: string
         default: ''
       metadata_batches:
@@ -44,7 +44,7 @@ jobs:
         env:
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
           SYNC_MODE: ${{ inputs.mode }}
-          SYNC_SECONDS: ${{ inputs.seconds || (inputs.mode == 'metadata' && '21300' || '900') }}
+          SYNC_SECONDS: ${{ inputs.seconds || '21600' }}
           METADATA_BATCHES: ${{ inputs.metadata_batches }}
         run: python apkpure/admin_mobile.py --mode "$SYNC_MODE" --seconds "$SYNC_SECONDS" --metadata-batches "$METADATA_BATCHES"
       - name: Remove sitemap browser
