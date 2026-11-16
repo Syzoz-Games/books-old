@@ -161,8 +161,12 @@ class SitemapBrowser:
             raise SyncError('Browser sitemap response was not HTTP 200', 'apkpure.net',
                             solution.get('status') if isinstance(solution, dict) else None)
         body = solution.get('response')
-        if not isinstance(body, str) or len(body.encode('utf-8')) > 12_000_000:
-            raise SyncError('Browser sitemap response is missing or too large', 'apkpure.net')
+        if not isinstance(body, str):
+            raise SyncError(f'Browser sitemap response is missing (type {type(body).__name__})', 'apkpure.net')
+        body_bytes = len(body.encode('utf-8'))
+        print(json.dumps({'phase': 'sitemap_response', 'document': root_name, 'response_bytes': body_bytes}), flush=True)
+        if body_bytes > 12_000_000:
+            raise SyncError(f'Browser sitemap response exceeds 12000000 bytes (received {body_bytes})', 'apkpure.net')
         # Chromium wraps rendered XML in HTML; retain only the strict XML document.
         pattern = rf'<(?:[\w.-]+:)?{root_name}\b.*?</(?:[\w.-]+:)?{root_name}\s*>'
         for candidate in (body, html.unescape(body)):
