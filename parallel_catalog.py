@@ -4,7 +4,7 @@ from pathlib import Path
 
 def load_plan(path, provider):
  p=json.loads(Path(path).read_text())
- if p.get('schema')!=1 or p.get('provider')!=provider or provider=='steam' and p.get('query_sort')!=2 or p.get('workers')!=(20 if provider=='mobile' and p.get('mode')=='release_dates' else 10) or not re.fullmatch(r'[0-9]+-[0-9]+',str(p.get('run_id',''))):raise ValueError('Invalid shared catalog plan')
+ if p.get('schema')!=1 or p.get('provider')!=provider or provider=='steam' and (p.get('query_sort')!=2 or p.get('listing_protocol')!=1) or p.get('workers')!=(20 if provider=='mobile' and p.get('mode')=='release_dates' else 10) or not re.fullmatch(r'[0-9]+-[0-9]+',str(p.get('run_id',''))):raise ValueError('Invalid shared catalog plan')
  return p
 
 def credential(provider, module):
@@ -100,8 +100,8 @@ def steam_transport(m):return m.Transport(os.environ.get('STEAM_SYNC_URL','https
 
 def steam_plan(m,args,run):
  _,_,_,total,_=m.store_catalog_page(0,time.monotonic()+90,count=1)
- reply=steam_transport(m).call('parallel-begin',run_id=run,workers=10,total=total,query_sort=2)
- return {'schema':1,'provider':'steam','workers':10,'query_sort':2,'run_id':run,'total':reply['total'],'offsets':reply['offsets'],'generation':reply['generation']}
+ reply=steam_transport(m).call('parallel-begin',run_id=run,workers=10,total=total,query_sort=2,listing_protocol=1)
+ return {'schema':1,'provider':'steam','workers':10,'query_sort':2,'listing_protocol':1,'run_id':run,'total':reply['total'],'offsets':reply['offsets'],'generation':reply['generation']}
 
 def steam_work(m,args,plan):
  tr=steam_transport(m);deadline=time.monotonic()+args.seconds
@@ -109,7 +109,7 @@ def steam_work(m,args,plan):
  while offset<plan['total'] and deadline-time.monotonic()>60:
   records=details=None
   for attempt in range(3):
-   try:records,details,_,_,_=m.store_catalog_page(offset,deadline);break
+   try:records,details,_,_,_,listings=m.store_catalog_page(offset,deadline,include_listings=True);break
    except (OSError,ValueError,RuntimeError):
     if attempt==2:raise
     time.sleep(attempt+1)
@@ -117,7 +117,7 @@ def steam_work(m,args,plan):
   class PageTransport:
    def __init__(self):self.chunk=0;self.receipt=None
    def call(self,action,**payload):
-    self.receipt=tr.call('parallel-batch',run_id=plan['run_id'],worker=args.worker,generation=plan['generation'],session=session,offset=offset,chunk=self.chunk,final=payload['state']['page_done'],records=payload['records'],details=payload['details']);self.chunk+=1
+    self.receipt=tr.call('parallel-batch',run_id=plan['run_id'],worker=args.worker,generation=plan['generation'],session=session,offset=offset,chunk=self.chunk,final=payload['state']['page_done'],listings=listings if payload['state']['page_done'] else [],records=payload['records'],details=payload['details']);self.chunk+=1
     return self.receipt
   page=PageTransport();base={'run_id':plan['run_id'],'page_done':False}
   m.send_catalog_batch(page,base,{**base,'page_done':True},records,details,'',max_body=5_400_000)
