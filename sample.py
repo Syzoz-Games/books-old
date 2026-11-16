@@ -15,6 +15,7 @@ import re
 import signal
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -373,6 +374,56 @@ def enrich_fresh_store(worker, records, browse, official, deadline):
         worker.store_dates(records, deadline=deadline)
 
 
+def browser_source(sources, url, endpoint):
+    # A browser is never started here. This endpoint must be explicitly enabled
+    # by the approved workflow; no cookies, headers, or raw HTML enter logs.
+    if endpoint != 'http://127.0.0.1:8191/v1':
+        raise SampleError('Browser endpoint must be the approved loopback service')
+    timeout = sources.budget.timeout(60)
+    body = json.dumps({'cmd': 'request.get', 'url': url, 'maxTimeout': int(timeout * 1000)}).encode()
+    sources.events.append({'source': 'steamdb_browser', 'url': url, 'endpoint': endpoint})
+    try:
+        request = urllib.request.Request(endpoint, body, {'Content-Type': 'application/json'})
+        with sources.timeout_factory(timeout, SampleError('Engine browser request timed out')):
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
+                raw = response.read(MAX_BODY + 1)
+        if len(raw) > MAX_BODY:
+            raise SampleError('Browser response exceeds limit')
+        result = json.loads(raw)
+        solution = result.get('solution') if isinstance(result, dict) and result.get('status') == 'ok' else None
+        if not isinstance(solution, dict) or not isinstance(solution.get('response'), str):
+            raise SampleError('Browser did not return a successful source response')
+        if len(solution['response'].encode('utf-8')) > MAX_BODY:
+            raise SampleError('Browser HTML exceeds limit')
+        return solution
+    except urllib.error.HTTPError as error:
+        code = error.code
+        error.close()
+        sources.events[-1]['http_status'] = code
+        raise SampleError('Browser service returned HTTP ' + str(code)) from None
+    except (OSError, ValueError):
+        raise SampleError('Browser source unavailable') from None
+
+
+def verified_engine_labels(body, status, headers, final_url, appid, *, require_html_header=True):
+    if type(status) is not int or status != 200 or is_challenge(body, headers):
+        raise SampleError('HTTP or challenge response; no engine verified')
+    content_type = headers.get('content-type', '').lower()
+    if (require_html_header and not content_type) or (content_type and 'text/html' not in content_type):
+        raise SampleError('Engine source did not return HTML')
+    parsed = urllib.parse.urlsplit(final_url)
+    if (parsed.scheme != 'https' or parsed.netloc != 'steamdb.info'
+            or parsed.path not in (f'/app/{appid}/', f'/app/{appid}/info/')
+            or parsed.query or parsed.fragment):
+        raise SampleError('Engine source URL identity did not match')
+    engines = parse_engines(body, appid, final_url)
+    if (not 1 <= len(engines) <= 20
+            or any(len(engine['label']) > 80 or any(unicodedata.category(c).startswith('C') for c in engine['label'])
+                   for engine in engines)):
+        raise SampleError('Engine labels do not fit the shared slot')
+    return engines
+
+
 def engine_result(sources, appid, github):
     url = f'https://steamdb.info/app/{appid}/info/'
     result = {'appid': appid, 'url': url, 'status': 'unavailable', 'verified': False,
@@ -383,18 +434,48 @@ def engine_result(sources, appid, github):
         body = raw.decode('utf-8', errors='replace')
         normalized_headers = {name.lower(): value for name, value in headers.items()}
         result['challenge'] = is_challenge(body, normalized_headers)
-        if status != 200 or result['challenge']:
-            result['reason'] = 'HTTP or challenge response; no engine verified'
-            return result
-        if 'text/html' not in normalized_headers.get('content-type', '').lower():
-            raise SampleError('Engine source did not return HTML')
-        engines = parse_engines(body, appid, final_url)
-        if not 1 <= len(engines) <= 20 or any(len(engine['label']) > 80 for engine in engines):
-            raise SampleError('Engine labels do not fit the shared slot')
-        result.update(status='verified', verified=True, engines=engines)
+        engines = verified_engine_labels(body, status, normalized_headers, final_url, appid)
+        result.update(status='verified', verified=True, engines=engines, verification_source='public_http')
+        return result
     except (SampleError, ValueError, OSError):
         result['reason'] = 'Public engine source unavailable or identity not verified'
+    endpoint = os.environ.get('STEAMDB_BROWSER_URL', '')
+    if endpoint:
+        result['browser_attempted'] = True
+        try:
+            solution = browser_source(sources, url, endpoint)
+            headers = solution.get('headers') or {}
+            if not isinstance(headers, dict):
+                raise SampleError('Browser source headers are malformed')
+            headers = {str(name).lower(): str(value) for name, value in headers.items()}
+            result['browser_http_status'] = solution.get('status')
+            engines = verified_engine_labels(solution['response'], solution.get('status'), headers,
+                                              solution.get('url', ''), appid, require_html_header=False)
+            result.update(status='verified', verified=True, engines=engines, verification_source='browser_service')
+            result.pop('reason', None)
+        except (SampleError, ValueError, OSError):
+            result['browser_reason'] = 'Browser source unavailable or identity not verified'
     return result
+
+
+def genre_labels(store):
+    genres = store.get('genres')
+    if not isinstance(genres, list):
+        return []
+    labels = []
+    seen = set()
+    for entry in genres:
+        name = entry.get('description') if isinstance(entry, dict) else None
+        if (not isinstance(name, str) or not 1 <= len(name.strip()) <= 80
+                or any(unicodedata.category(c).startswith('C') for c in name)):
+            continue
+        name = name.strip()
+        if name.casefold() not in seen:
+            labels.append(name)
+            seen.add(name.casefold())
+        if len(labels) == 20:
+            break
+    return labels
 
 
 def build_sample(worker, sources, appids, github):
@@ -427,6 +508,9 @@ def build_sample(worker, sources, appids, github):
     histories = []
     engines = []
     owners = []
+    reviews = []
+    releases = []
+    categories = []
     next_request = 0.0
     for record in records:
         appid = record['appid']
@@ -446,6 +530,33 @@ def build_sample(worker, sources, appids, github):
         except (SampleError, ValueError, TypeError):
             owners.append({'appid': appid, 'url': owner_url, 'status': 'unavailable',
                            'reason': 'No matching verified owner range; no observations invented', 'github_run_id': github['run_id']})
+        if not record.get('tags'):
+            labels = genre_labels(store[appid])
+            if labels:
+                record.update(category=labels[0], tags=labels)
+                categories.append({'appid': appid, 'source': 'steam_store_genres', 'labels': labels})
+        else:
+            categories.append({'appid': appid, 'source': 'steamspy_tags', 'labels': record['tags']})
+        if record.get('rating') is None:
+            review_url = f'https://store.steampowered.com/appreviews/{appid}?' + urllib.parse.urlencode(
+                {'json': 1, 'language': 'all', 'purchase_type': 'all', 'num_per_page': 1, 'filter': 'all'})
+            diagnostic = {'appid': appid, 'url': review_url, 'status': 'unavailable'}
+            try:
+                response = sources.json(review_url, 'steam_reviews')
+                summary = response.get('query_summary') if isinstance(response.get('query_summary'), dict) else {}
+                diagnostic['query_summary'] = {name: summary[name] for name in
+                    ('total_positive', 'total_negative', 'total_reviews', 'review_score', 'review_score_desc', 'num_reviews')
+                    if name in summary and (type(summary[name]) is int or isinstance(summary[name], str))}
+                fields = worker.review_fields(appid, response, checked_at)
+                record.update(fields)
+                diagnostic['status'] = 'verified' if fields else 'no_reviews'
+            except (SampleError, ValueError, TypeError):
+                diagnostic['reason'] = 'No valid nonzero global review summary; rating remains unknown'
+            reviews.append(diagnostic)
+        common = pics[appid].get('common') or {}
+        releases.append({'appid': appid, 'pics_release_ts': worker.timestamp(common.get('steam_release_date')),
+                         'release_ts': record.get('release_ts'),
+                         'official_release_label': store[appid].get('release_date', {}).get('date')})
         if type(record.get('is_free')) is not bool or record['is_free'] != store[appid]['is_free']:
             raise SampleError('Store sources disagree or free status is unavailable')
         engine = engine_result(sources, appid, github)
@@ -457,7 +568,9 @@ def build_sample(worker, sources, appids, github):
         histories.append({'package': f'steam:{appid}', 'revision': checked_at, 'points': points})
     payload = {'action': 'sample', 'records': records, 'details': details,
         'install_history': {'schema': 1, 'mode': 'replace', 'games': histories}, 'github': github}
-    return payload, {'github': github, 'engine_diagnostics': engines, 'owner_diagnostics': owners, 'sources': sources.events}
+    return payload, {'github': github, 'engine_diagnostics': engines, 'owner_diagnostics': owners,
+                     'review_diagnostics': reviews, 'release_diagnostics': releases,
+                     'category_diagnostics': categories, 'sources': sources.events}
 
 
 def payload_bytes(payload):
