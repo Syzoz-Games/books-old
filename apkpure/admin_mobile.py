@@ -135,7 +135,7 @@ class SitemapBrowser:
         self.http, self.session = http, None
 
     def command(self, payload):
-        raw = self.http.request(self.ENDPOINT, 'flaresolverr', payload, maximum=16_000_000)
+        raw = self.http.request(self.ENDPOINT, 'flaresolverr', payload, maximum=32_000_000)
         try:
             result = json.loads(raw)
         except ValueError:
@@ -165,14 +165,17 @@ class SitemapBrowser:
             raise SyncError(f'Browser sitemap response is missing (type {type(body).__name__})', 'apkpure.net')
         body_bytes = len(body.encode('utf-8'))
         print(json.dumps({'phase': 'sitemap_response', 'document': root_name, 'response_bytes': body_bytes}), flush=True)
-        if body_bytes > 12_000_000:
-            raise SyncError(f'Browser sitemap response exceeds 12000000 bytes (received {body_bytes})', 'apkpure.net')
+        if body_bytes > 24_000_000:
+            raise SyncError(f'Browser sitemap response exceeds 24000000 bytes (received {body_bytes})', 'apkpure.net')
         # Chromium wraps rendered XML in HTML; retain only the strict XML document.
         pattern = rf'<(?:[\w.-]+:)?{root_name}\b.*?</(?:[\w.-]+:)?{root_name}\s*>'
         for candidate in (body, html.unescape(body)):
             match = re.search(pattern, candidate, re.S)
             if match:
-                return xml_document(match.group().encode('utf-8'), root_name)
+                raw = match.group().encode('utf-8')
+                if len(raw) > 8_000_000:
+                    raise SyncError('Sitemap exceeds the XML size limit', 'apkpure.net')
+                return xml_document(raw, root_name)
         raise SyncError('Browser did not return sitemap XML', 'apkpure.net')
 
     def close(self):
