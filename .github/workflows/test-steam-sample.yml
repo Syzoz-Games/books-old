@@ -7,6 +7,10 @@ on:
         required: true
         default: '620 730'
         type: string
+      browser:
+        description: Try a bounded SteamDB browser request; may interact with Cloudflare verification
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -23,9 +27,19 @@ jobs:
           python-version: '3.12'
       - name: Install existing collector dependencies
         run: pip install -r requirements.txt
+      - name: Start the optional SteamDB browser service
+        if: inputs.browser
+        run: |
+          docker run -d --name steamdb-browser --shm-size=1g --tmpfs /tmp:exec,mode=1777,size=1G -p 127.0.0.1:8191:8191 -e LOG_LEVEL=WARNING ghcr.io/flaresolverr/flaresolverr:latest
+          for attempt in $(seq 1 45); do
+            if curl --silent --max-time 2 --output /dev/null http://127.0.0.1:8191/; then exit 0; fi
+            sleep 1
+          done
+          exit 1
       - name: Collect and upload the bounded sample
         env:
           SAMPLE_APP_IDS: ${{ inputs.appids }}
+          STEAMDB_BROWSER_URL: ${{ inputs.browser && 'http://127.0.0.1:8191/v1' || '' }}
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
           STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
         run: |
@@ -46,3 +60,6 @@ jobs:
             sample-payload.json
           if-no-files-found: warn
           retention-days: 3
+      - name: Stop the optional browser service
+        if: always() && inputs.browser
+        run: docker rm -f steamdb-browser || true
