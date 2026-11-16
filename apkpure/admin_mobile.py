@@ -281,6 +281,62 @@ def download_metadata(http, package):
         raise SyncError('Metadata API rejected an ordinary single-app request' + suffix, 'tapi.pureapk.com')
     return metadata_detail(response['app_detail_map'].get(package), package)
 
+def attach_play_metrics(http, details):
+    """Add Google Play US metrics to available game records in one request."""
+    from urllib.parse import urlencode
+    packages = [package for package, detail in details.items() if isinstance(detail, dict)]
+    if not packages:
+        return
+    calls = []
+    for package in packages:
+        args = [None, None, [[14, 52]], None, None, [[package, 7]]]
+        calls.append(['Ws7gDc', json.dumps(args), None, package])
+    url = 'https://play.google.com/_/PlayStoreUi/data/batchexecute?rpcids=Ws7gDc&hl=en&gl=US&rt=c'
+    request = urllib.request.Request(url, urlencode({'f.req': json.dumps([calls])}).encode(),
+                                     {'Content-Type': 'application/x-www-form-urlencoded'})
+    remaining = http.deadline - time.monotonic() - 10
+    if remaining < 1:
+        return
+    seen = 0
+    try:
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=min(20, remaining)) as response:
+            body = response.read(2_000_001)
+        if len(body) > 2_000_000:
+            raise ValueError('Oversized metrics response')
+        for line in body.splitlines():
+            if not line.startswith(b'[['):
+                continue
+            for row in json.loads(line):
+                if len(row) < 7 or row[:2] != ['wrb.fr', 'Ws7gDc'] or row[6] not in packages or not isinstance(row[2], str):
+                    continue
+                package = row[6]
+                try:
+                    data = json.loads(row[2])[1]
+                    if data[3]['12'][0][0] != package:
+                        continue
+                    values = data[2]
+                    def field(number):
+                        entry = values[number - 1] if len(values) >= number else None
+                        return entry if entry is not None else values[-1].get(str(number))
+                    installs = field(14)
+                    scores = field(52)
+                    metrics = {}
+                    if isinstance(installs, list) and len(installs) >= 3 and type(installs[2]) is int and type(installs[1]) is int and 0 <= installs[1] <= installs[2]:
+                        metrics['installs'] = installs[2]
+                    if scores and scores[0] and len(scores[0]) > 1:
+                        rating = scores[0][1]
+                        if type(rating) in (int, float) and 0 < rating <= 5:
+                            metrics['rating'] = rating
+                    if metrics:
+                        details[package].update(metrics, metrics_checked_at=int(time.time()))
+                        seen += 1
+                except (ValueError, TypeError, IndexError, KeyError, AttributeError):
+                    continue
+    except (OSError, ValueError, TypeError):
+        pass
+    print(json.dumps({'phase': 'play_metrics', 'requested': len(packages), 'received': seen}), flush=True)
+
+
 def sync_metadata(http, credential, run, batches):
     stored = dated = processed = 0
     for number in range(batches):
@@ -313,6 +369,7 @@ def sync_metadata(http, credential, run, batches):
                                 pending.cancel()
                     except (ValueError, TypeError, OSError):
                         failures[package] = SyncError('Metadata download returned invalid data', 'tapi.pureapk.com')
+            attach_play_metrics(http, details)
             receipt = http.website(METADATA, {'action': 'submit', **base, 'details': details, 'failed_packages': list(failures)}, credential, metadata=True)
             if receipt.get('status') != 'submitted':
                 raise SyncError('Website did not acknowledge metadata submission', 'website')
