@@ -392,11 +392,11 @@ def sync_metadata(http, credential, run, batches):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode', choices=('all', 'sitemaps', 'metadata'), default='all')
-    parser.add_argument('--seconds', type=int, default=900)
+    parser.add_argument('--seconds', type=int, default=21600)
     parser.add_argument('--metadata-batches', type=int, default=20)
     args = parser.parse_args(argv)
     try:
-        max_seconds = 21300 if args.mode == "metadata" else 1800
+        max_seconds = 21600
         if not 60 <= args.seconds <= max_seconds or not 0 <= args.metadata_batches <= 200:
             raise SyncError('Invalid bounded runtime or metadata batch count', 'configuration')
         credential = catalog_credential(os.environ.get('STEAM_SYNC_TOKEN'))
