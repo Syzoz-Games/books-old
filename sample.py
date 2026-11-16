@@ -238,7 +238,7 @@ def main(argv=None):
         try:
             payload, diagnostics = build_sample(worker, sources, args.appids, github)
             worker.fetch_engines(payload['records'], sources.budget.deadline)
-            diagnostics['engine_diagnostics'] = [{'appid': r['appid'], 'source': 'wikidata', 'engines': r.get('architectures')} for r in payload['records']]
+            diagnostics['engine_diagnostics'] = [{'appid': r['appid'], 'lookup_sources': ['wikidata','pcgamingwiki'], 'engines': r.get('architectures')} for r in payload['records']]
             result.update(diagnostics)
             payload_bytes(payload)
             write_public_json(args.output, payload)
