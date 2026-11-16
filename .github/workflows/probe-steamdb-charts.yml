@@ -1,0 +1,38 @@
+name: Test one SteamDB charts page
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: steamdb-one-page-probe
+  cancel-in-progress: false
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Fetch one public charts page
+        run: |
+          python3 - <<'PYTHON'
+          import json,re,time,urllib.request,urllib.error,os
+          url='https://steamdb.info/app/730/charts/'
+          started=time.monotonic()
+          request=urllib.request.Request(url,headers={'User-Agent':'SyzozSteamSample/1.0'})
+          try:
+              response=urllib.request.urlopen(request,timeout=20)
+              status=response.status;body=response.read(2000000).decode('utf-8','replace')
+          except urllib.error.HTTPError as error:
+              status=error.code;body=error.read(2000000).decode('utf-8','replace')
+          title=re.search(r'<title>(.*?)</title>',body,re.S)
+          result={'url':url,'http_status':status,'bytes':len(body.encode()),'seconds':round(time.monotonic()-started,2),'title':title.group(1) if title else None,'chart_page_verified':status==200 and 'Owner estimations' in body and 'Steam charts' in body,'captcha_interaction':False,'production_modified':False}
+          print(json.dumps(result),flush=True)
+          with open('steamdb-charts-result.json','w') as f:json.dump(result,f,indent=2)
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write('## One-page SteamDB access test\n```json\n'+json.dumps(result,indent=2)+'\n```\n')
+          if not result['chart_page_verified']:raise SystemExit(1)
+          PYTHON
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: steamdb-charts-one-page-result
+          path: steamdb-charts-result.json
+          retention-days: 3
