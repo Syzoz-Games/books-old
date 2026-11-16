@@ -358,7 +358,7 @@ def load_worker():
 def main(argv=None):
  parser=argparse.ArgumentParser(description=__doc__);sub=parser.add_subparsers(dest='command',required=True)
  p=sub.add_parser('plan');p.add_argument('--limit',type=int,default=1000);p.add_argument('--logical-workers',type=int,default=100);p.add_argument('--runners',type=int,default=2);p.add_argument('--seconds',type=int,default=240);p.add_argument('--output',type=Path,default=Path('manifest.json'));p.add_argument('--start',type=int,default=0);p.add_argument('--include-unreleased',action='store_true');p.add_argument('--resume-manifest',type=Path);p.add_argument('--production',action='store_true');p.add_argument('--reuse-manifest',type=Path)
- p=sub.add_parser('work');p.add_argument('--manifest',type=Path,required=True);p.add_argument('--runner',type=int,required=True);p.add_argument('--seconds',type=int,default=600);p.add_argument('--owners-limit',type=int,default=0);p.add_argument('--output',type=Path,default=Path('batch-results'));p.add_argument('--engine-seconds',type=int,default=20);p.add_argument('--engine-fallbacks',action='store_true')
+ p=sub.add_parser('work');p.add_argument('--manifest',type=Path,required=True);p.add_argument('--runner',type=int,required=True);p.add_argument('--seconds',type=int,default=21600);p.add_argument('--owners-limit',type=int,default=0);p.add_argument('--output',type=Path,default=Path('batch-results'));p.add_argument('--engine-seconds',type=int,default=20);p.add_argument('--engine-fallbacks',action='store_true')
  p=sub.add_parser('finalize');p.add_argument('--manifest',type=Path,required=True);p.add_argument('--directory',type=Path,required=True);p.add_argument('--output',type=Path,default=Path('batch-final-result.json'));p.add_argument('--upload',action='store_true');p.add_argument('--production',action='store_true')
  p=sub.add_parser('replay');p.add_argument('--manifest',type=Path,required=True);p.add_argument('--runner',type=int,required=True);p.add_argument('--directory',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
  args=parser.parse_args(argv)
@@ -378,7 +378,7 @@ def main(argv=None):
     with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('matrix='+json.dumps({'runner':list(range(result['runners']))},separators=(',',':'))+'\n');f.write('replay_only='+('true' if args.production and receiver.replay_only else 'false')+'\n')
   elif args.command=='work':
    manifest=json.loads(args.manifest.read_text());validate_manifest(manifest,github)
-   if not 1<=args.seconds<=900 or not 0<=args.owners_limit<=60 or not 0<=args.engine_seconds<=60:raise BatchError('Worker <=900 seconds; optional owners <=60 and engine seconds <=60 required')
+   if not 1<=args.seconds<=21600 or not 0<=args.owners_limit<=60 or not 0<=args.engine_seconds<=60:raise BatchError('Worker <=21600 seconds; optional owners <=60 and engine seconds <=60 required')
    result=run_shards(load_worker(),JsonClient(args.seconds,max(1,manifest['runners']),slot=args.runner),manifest,args.runner,args.output,args.owners_limit,args.engine_seconds,args.engine_fallbacks);print(compact({k:result[k] for k in ('runner','status','coverage','owners_attempted')}).decode())
    if result['status']!='complete':return 1
   elif args.command=='replay':
