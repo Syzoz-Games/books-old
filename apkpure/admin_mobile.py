@@ -47,7 +47,7 @@ class Http:
         self.deadline = time.monotonic() + seconds
         self.local = threading.local()
 
-    def request(self, url, source, payload=None, credential=None, headers=None, maximum=8_000_000, reserve=0):
+    def request(self, url, source, payload=None, credential=None, headers=None, maximum=8_000_000, reserve=0, timeout=45):
         remaining = self.deadline - time.monotonic()
         if remaining <= reserve + 1:
             raise SyncError('Time budget reached; saved checkpoints are retained', source)
@@ -65,7 +65,7 @@ class Http:
             try:
                 if not hasattr(self.local, 'opener'):
                     self.local.opener = urllib.request.build_opener(NoRedirect())
-                response = self.local.opener.open(request, timeout=min(45, remaining - reserve))
+                response = self.local.opener.open(request, timeout=min(timeout, remaining - reserve))
             except urllib.error.HTTPError as error:
                 response = error
             with response:
@@ -91,11 +91,11 @@ class Http:
         except (OSError, TimeoutError):
             raise SyncError('Ordinary HTTP request failed or timed out', source) from None
 
-    def website(self, url, payload, credential, metadata=False):
+    def website(self, url, payload, credential, metadata=False, timeout=45, attempts=3):
         raw_request = compact(payload)
-        for attempt in range(3):
+        for attempt in range(attempts):
             try:
-                raw = self.request(url, 'website', payload, credential, maximum=1_000_000)
+                raw = self.request(url, 'website', payload, credential, maximum=1_000_000, timeout=timeout)
                 try:
                     result = json.loads(raw)
                 except ValueError:
@@ -106,7 +106,7 @@ class Http:
                     raise SyncError('Metadata receipt identity or checksum mismatch', 'website')
                 return result
             except SyncError as error:
-                if error.status is not None and error.status < 500 or attempt == 2:
+                if error.status is not None and error.status < 500 or attempt == attempts - 1:
                     raise
                 if self.deadline - time.monotonic() <= attempt + 2:
                     raise
