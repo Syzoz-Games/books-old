@@ -192,9 +192,18 @@ class SitemapBrowser:
         finally:
             self.session = None
 
-def sync_sitemaps(http, credential, run):
+def sync_sitemaps(http, credential, run, metadata_batches=0):
     begun = False
     browser = SitemapBrowser(http)
+    metadata = {'batches': 0, 'stored': 0, 'dated': 0}
+    def index_metadata(checkpoint):
+        if not metadata_batches:
+            return
+        # Each round has a distinct claim namespace, including empty claims.
+        result = sync_metadata(http, credential, f'{run}-{checkpoint}', metadata_batches)
+        for field in metadata:
+            metadata[field] += result[field]
+        print(json.dumps({'phase': 'metadata_checkpoint', 'checkpoint': checkpoint, **metadata}), flush=True)
     def upload(action, **fields):
         return http.website(MIRROR, {'action': action, 'run_id': run, **fields}, credential)
     try:
@@ -218,6 +227,8 @@ def sync_sitemaps(http, credential, run):
         if not isinstance(pending, dict) or any(url not in manifest or modified != manifest[url] for url, modified in pending.items()):
             raise SyncError('Website returned invalid pending sitemap checkpoints', 'website')
         print(json.dumps({'phase': 'sitemaps', 'manifest_files': len(manifest), 'pending_files': len(pending), 'unchanged_files': len(manifest) - len(pending)}), flush=True)
+        # Resume saved metadata immediately, then enrich after every saved map.
+        index_metadata('backlog')
         for number, url in enumerate(pending, 1):
             root = browser.fetch(url, 'urlset')
             ET.register_namespace('', NS)
@@ -229,10 +240,11 @@ def sync_sitemaps(http, credential, run):
                 raise SyncError('Sitemap exceeds the receiver compressed limit', 'apkpure.net')
             saved = upload('file', url=url, sha256=hashlib.sha256(body).hexdigest(), gzip=base64.b64encode(zipped).decode('ascii'))
             print(json.dumps({'phase': 'sitemaps', 'file': url.rsplit('/', 1)[-1], 'saved_this_run': number, 'pending_at_start': len(pending), 'entries': saved.get('entries'), 'files_done': saved.get('files_done')}), flush=True)
+            index_metadata(f'file-{number}')
         result = upload('finish')
         if result.get('complete') is not True:
             raise SyncError('Website did not confirm the complete sitemap checkpoint', 'website')
-        return {'status': 'complete', 'manifest_files': len(manifest), 'downloaded_files': len(pending)}
+        return {'status': 'complete', 'manifest_files': len(manifest), 'downloaded_files': len(pending), 'metadata': metadata}
     except Exception:
         if begun:
             try:
@@ -337,7 +349,7 @@ def main(argv=None):
         results, errors = {}, []
         if args.mode in ('all', 'sitemaps'):
             try:
-                results['sitemaps'] = sync_sitemaps(http, credential, run)
+                results['sitemaps'] = sync_sitemaps(http, credential, run, args.metadata_batches if args.mode == 'all' else 0)
             except SyncError as error:
                 errors.append(error)
                 results['sitemaps'] = {'status': 'failed', 'source': error.source, 'http_status': error.status, 'cloudflare_challenge': error.challenge, 'error': str(error)}
