@@ -7,6 +7,28 @@ on:
         type: number
         default: 1000
         required: true
+      start:
+        description: Explicit query offset for a new scan; default 0
+        type: number
+        default: 0
+        required: true
+      include_unreleased:
+        description: Include upcoming games; a resumed manifest inherits its prior scope
+        type: boolean
+        default: false
+      resume_run_id:
+        description: Optional prior benchmark run ID whose manifest supplies next_start
+        type: string
+        default: ''
+      engine_seconds:
+        description: Shared engine lookup budget per runner, 0 to 60 seconds
+        type: number
+        default: 20
+        required: true
+      engine_fallbacks:
+        description: Opt in to bounded PCGamingWiki and per-app news engine fallbacks
+        type: boolean
+        default: false
       logical_workers:
         description: Disjoint logical shards, 1 to 100
         type: number
@@ -28,6 +50,7 @@ on:
         default: false
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: steam-bounded-json-benchmark
   cancel-in-progress: false
@@ -42,13 +65,34 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Load the prior immutable manifest when resuming
+        if: inputs.resume_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: steam-batch-manifest-${{ inputs.resume_run_id }}
+          run-id: ${{ inputs.resume_run_id }}
+          github-token: ${{ github.token }}
+          path: resume-manifest
       - name: Make the immutable bounded manifest
         id: plan
         env:
           LIMIT: ${{ inputs.limit }}
           LOGICAL: ${{ inputs.logical_workers }}
           RUNNERS: ${{ inputs.runners }}
-        run: python batch.py plan --limit "$LIMIT" --logical-workers "$LOGICAL" --runners "$RUNNERS" --seconds 240 --output manifest.json
+          START: ${{ inputs.start }}
+          INCLUDE_UNRELEASED: ${{ inputs.include_unreleased }}
+          RESUME_RUN_ID: ${{ inputs.resume_run_id }}
+        run: |
+          python - <<'PY'
+          import os,subprocess,sys
+          cmd=[sys.executable,'batch.py','plan','--limit',os.environ['LIMIT'],'--logical-workers',os.environ['LOGICAL'],'--runners',os.environ['RUNNERS'],'--seconds','240','--output','manifest.json']
+          if os.environ['RESUME_RUN_ID']:
+              if os.environ['START']!='0': raise SystemExit('Do not set start while resuming')
+              cmd += ['--resume-manifest','resume-manifest/manifest.json']
+          else: cmd += ['--start',os.environ['START']]
+          if os.environ['INCLUDE_UNRELEASED']=='true': cmd += ['--include-unreleased']
+          subprocess.run(cmd,check=True)
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: steam-batch-manifest-${{ github.run_id }}
@@ -75,7 +119,15 @@ jobs:
         env:
           RUNNER_INDEX: ${{ matrix.runner }}
           OWNERS_LIMIT: ${{ inputs.owners_limit }}
-        run: python batch.py work --manifest manifest.json --runner "$RUNNER_INDEX" --seconds 900 --owners-limit "$OWNERS_LIMIT" --output batch-results
+          ENGINE_SECONDS: ${{ inputs.engine_seconds }}
+          ENGINE_FALLBACKS: ${{ inputs.engine_fallbacks }}
+        run: |
+          python - <<'PY'
+          import os,subprocess,sys
+          cmd=[sys.executable,'batch.py','work','--manifest','manifest.json','--runner',os.environ['RUNNER_INDEX'],'--seconds','900','--owners-limit',os.environ['OWNERS_LIMIT'],'--engine-seconds',os.environ['ENGINE_SECONDS'],'--output','batch-results']
+          if os.environ['ENGINE_FALLBACKS']=='true': cmd += ['--engine-fallbacks']
+          subprocess.run(cmd,check=True)
+          PY
       - name: Preserve shard evidence even after failure
         if: always()
         uses: actions/upload-artifact@v4
