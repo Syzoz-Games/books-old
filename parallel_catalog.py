@@ -4,7 +4,7 @@ from pathlib import Path
 
 def load_plan(path, provider):
  p=json.loads(Path(path).read_text())
- if p.get('schema')!=1 or p.get('provider')!=provider or p.get('workers')!=10 or not re.fullmatch(r'[0-9]+-[0-9]+',str(p.get('run_id',''))):raise ValueError('Invalid shared catalog plan')
+ if p.get('schema')!=1 or p.get('provider')!=provider or p.get('workers')!=(20 if provider=='mobile' and p.get('mode')=='release_dates' else 10) or not re.fullmatch(r'[0-9]+-[0-9]+',str(p.get('run_id',''))):raise ValueError('Invalid shared catalog plan')
  return p
 
 def credential(provider, module):
@@ -14,7 +14,7 @@ def credential(provider, module):
 
 def mobile_plan(m, args, run):
  token=credential('mobile',m);http=m.Http(args.seconds)
- plan={'schema':1,'provider':'mobile','workers':10,'run_id':run,'mode':args.mode,'pending':[]}
+ plan={'schema':1,'provider':'mobile','workers':20 if args.mode=='release_dates' else 10,'run_id':run,'mode':args.mode,'pending':[]}
  if args.mode in ('all','release_dates'):
   http.website(m.METADATA,{'scope':'release_dates','action':'seed','run_id':run,'claim_id':run+'-seed'},token,timeout=120)
  if args.mode not in ('metadata','release_dates'):
@@ -141,15 +141,16 @@ def main():
  parser.add_argument('--seconds',type=int,default=21600);parser.add_argument('--mode',choices=['all','sitemaps','metadata','release_dates'],default='all')
  parser.add_argument('--metadata-batches',type=int,default=20);parser.add_argument('--owners-seconds',type=int,default=300);parser.add_argument('--engine-seconds',type=int,default=60)
  args=parser.parse_args()
- if not 60<=args.seconds<=21600 or not 0<=args.worker<10 or not 0<=args.metadata_batches<=200 or not 0<=args.owners_seconds<=600 or not 0<=args.engine_seconds<=120:raise ValueError('Invalid worker bounds')
+ if not 60<=args.seconds<=21600 or not 0<=args.worker<20 or not 0<=args.metadata_batches<=200 or not 0<=args.owners_seconds<=600 or not 0<=args.engine_seconds<=120:raise ValueError('Invalid worker bounds')
  module=importlib.import_module('apkpure.admin_mobile' if args.provider=='mobile' else 'collect')
  if args.stage=='plan':
   run=os.environ.get('GITHUB_RUN_ID','')+'-'+os.environ.get('GITHUB_RUN_ATTEMPT','1')
   if not re.fullmatch(r'[0-9]+-[0-9]+',run):raise ValueError('GitHub run identity required')
   plan=(mobile_plan if args.provider=='mobile' else steam_plan)(module,args,run)
-  Path(args.plan).write_text(json.dumps(plan));print(json.dumps({'provider':args.provider,'workers':10,'plan_saved':True}),flush=True)
+  Path(args.plan).write_text(json.dumps(plan));print(json.dumps({'provider':args.provider,'workers':plan['workers'],'plan_saved':True}),flush=True)
  else:
   plan=load_plan(args.plan,args.provider)
+  if args.worker>=plan['workers']:raise ValueError('Worker is outside the shared plan')
   function={('mobile','work'):mobile_work,('mobile','finish'):mobile_finish,('steam','work'):steam_work,('steam','finish'):steam_finish}[(args.provider,args.stage)]
   print(json.dumps(function(module,args,plan)),flush=True)
 if __name__=='__main__':main()
