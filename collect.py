@@ -204,6 +204,33 @@ def store_free_status(appid,deadline=None):
   error.close();return None
  except (OSError,ValueError):return None
  return None
+def fetch_engines(records, deadline):
+    games = {r['appid']: r for r in records if r.get('type') == 'game'}
+    ids = list(games)
+    for start in range(0, len(ids), 80):
+        remaining = deadline - time.monotonic()
+        if remaining < 1:
+            break
+        batch = ids[start:start + 80]
+        values = ' '.join(json.dumps(str(i)) for i in batch)
+        query = ('SELECT DISTINCT ?id ?name WHERE { VALUES ?id { ' + values +
+                 ' } ?game wdt:P1733 ?id ; wdt:P408 ?engine . '
+                 '?engine rdfs:label ?name . FILTER(LANG(?name)="en") } ORDER BY ?id ?name')
+        url = 'https://query.wikidata.org/sparql?' + urllib.parse.urlencode({'query': query, 'format': 'json'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'SyzozPlay/1.0 (https://syzoz.com/game-explorer/)'})
+        try:
+            with urllib.request.urlopen(req, timeout=min(8, remaining)) as response:
+                bindings = json.load(response)['results']['bindings']
+            for row in bindings:
+                appid = int(row['id']['value'])
+                name = row['name']['value']
+                if appid in batch and isinstance(name,str) and 0 < len(name) <= 80 and name.isprintable():
+                    labels = games[appid].get('architectures') or []
+                    if name not in labels and len(labels) < 20:
+                        games[appid]['architectures'] = labels + [name]
+        except (OSError, ValueError, TypeError, KeyError):
+            return
+
 def store_dates(records,deadline=None,tag_names=None,include_details=False):
  # Commerce applies to every named game, including records already dated by PICS.
  # Missing StoreBrowse flags use a bounded explicit Store-listing fallback.
@@ -358,6 +385,7 @@ def main():
     with Timeout(min(65,remaining),RuntimeError('PICS batch timed out')):info=client.get_product_info(apps=ids)
     if not isinstance(info,dict) or 'apps' not in info:raise RuntimeError('Incomplete PICS response')
     apps=info.get('apps') or {};records=[r for i,a in apps.items() if (r:=normalize(i,a))];details=store_dates(records,deadline=catalog_deadline,include_details=True)
+    fetch_engines(records,catalog_deadline)
     returned={int(i) for i in apps};unknown=[i for i in ids if i not in returned];unnamed=[int(i) for i,a in apps.items() if not (a.get('common') or {}).get('name')]
     if kind=='scan':state['cursor']=max(ids)+1;state['scanned_ids']+=len(ids);state['unknown_ids']+=len(unknown);state['restricted_records']+=len(unnamed)
     elif kind=='changes':state['pending_changes']=state['pending_changes'][len(ids):]
