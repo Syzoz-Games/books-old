@@ -16,7 +16,7 @@ def mobile_plan(m, args, run):
  token=credential('mobile',m);http=m.Http(args.seconds)
  plan={'schema':1,'provider':'mobile','workers':10,'run_id':run,'mode':args.mode,'pending':[]}
  if args.mode in ('all','release_dates'):
-  http.website(m.METADATA,{'scope':'release_dates','action':'seed','run_id':run,'claim_id':run+'-seed'},token)
+  http.website(m.METADATA,{'scope':'release_dates','action':'seed','run_id':run,'claim_id':run+'-seed'},token,timeout=120)
  if args.mode not in ('metadata','release_dates'):
   browser=m.SitemapBrowser(http)
   try:
