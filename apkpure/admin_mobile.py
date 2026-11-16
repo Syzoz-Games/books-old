@@ -4,6 +4,7 @@ import base64
 import gzip
 import hashlib
 import html
+import http.client
 import hmac
 import json
 import os
@@ -51,7 +52,7 @@ class Http:
         remaining = self.deadline - time.monotonic()
         if remaining <= reserve + 1:
             raise SyncError('Time budget reached; saved checkpoints are retained', source)
-        body = None if payload is None else compact(payload)
+        body = None if payload is None else payload if isinstance(payload, bytes) else compact(payload)
         if body is not None and source == 'website' and len(body) > MAX_UPLOAD:
             raise SyncError('Upload exceeds the bounded website payload limit', source)
         request_headers = {'User-Agent': 'SyzozCatalogAdmin/1.0 (+https://syzoz.com/game-explorer/)', 'Accept-Encoding': 'identity'}
@@ -88,7 +89,7 @@ class Http:
             return raw
         except SyncError:
             raise
-        except (OSError, TimeoutError):
+        except (OSError, TimeoutError, http.client.HTTPException):
             raise SyncError('Ordinary HTTP request failed or timed out', source) from None
 
     def website(self, url, payload, credential, metadata=False, timeout=45, attempts=3):
@@ -294,60 +295,98 @@ def download_metadata(http, package):
         raise SyncError('Metadata API rejected an ordinary single-app request' + suffix, 'tapi.pureapk.com')
     return metadata_detail(response['app_detail_map'].get(package), package)
 
-def attach_play_metrics(http, details):
-    """Add Google Play US metrics to available game records in one request."""
-    from urllib.parse import urlencode
-    packages = [package for package, detail in details.items() if isinstance(detail, dict)]
-    if not packages:
-        return
-    calls = []
-    for package in packages:
-        args = [None, None, [[14, 52]], None, None, [[package, 7]]]
-        calls.append(['Ws7gDc', json.dumps(args), None, package])
-    url = 'https://play.google.com/_/PlayStoreUi/data/batchexecute?rpcids=Ws7gDc&hl=en&gl=US&rt=c'
-    request = urllib.request.Request(url, urlencode({'f.req': json.dumps([calls])}).encode(),
-                                     {'Content-Type': 'application/x-www-form-urlencoded'})
-    remaining = http.deadline - time.monotonic() - 10
-    if remaining < 1:
-        return
-    seen = 0
-    try:
-        with urllib.request.build_opener(NoRedirect()).open(request, timeout=min(20, remaining)) as response:
-            body = response.read(2_000_001)
-        if len(body) > 2_000_000:
-            raise ValueError('Oversized metrics response')
-        for line in body.splitlines():
-            if not line.startswith(b'[['):
+def parse_play_metrics(body, packages, checked_at):
+    """Only matching RPC identities and explicit not-found results are completed."""
+    results = {}
+    for line in body.splitlines():
+        if not line.startswith(b'[['):
+            continue
+        for row in json.loads(line):
+            if not isinstance(row, list) or len(row) < 7 or row[:2] != ['wrb.fr', 'Ws7gDc'] or row[6] not in packages:
                 continue
-            for row in json.loads(line):
-                if len(row) < 7 or row[:2] != ['wrb.fr', 'Ws7gDc'] or row[6] not in packages or not isinstance(row[2], str):
+            package = row[6]
+            if package in results:
+                raise ValueError('Duplicate Google Play response')
+            if row[2] is None and row[5] == [5]:
+                results[package] = {'play_status': 'unavailable', 'metrics_checked_at': checked_at}
+                continue
+            if not isinstance(row[2], str):
+                continue
+            try:
+                data = json.loads(row[2])[1]
+                if data[3]['12'][0][0] != package:
                     continue
-                package = row[6]
-                try:
-                    data = json.loads(row[2])[1]
-                    if data[3]['12'][0][0] != package:
+                values = data[2]
+                def field(number):
+                    entry = values[number - 1] if len(values) >= number else None
+                    tail = values[-1] if values else None
+                    return entry if entry is not None else tail.get(str(number)) if isinstance(tail, dict) else None
+                release, installs, scores = field(11), field(14), field(52)
+                metrics = {'play_status': 'no_date', 'metrics_checked_at': checked_at}
+                if release is not None:
+                    stamp = release[1][0]
+                    if type(stamp) is not int or not 1 <= stamp <= 253402300799:
                         continue
-                    values = data[2]
-                    def field(number):
-                        entry = values[number - 1] if len(values) >= number else None
-                        return entry if entry is not None else values[-1].get(str(number))
-                    installs = field(14)
-                    scores = field(52)
-                    metrics = {}
-                    if isinstance(installs, list) and len(installs) >= 3 and type(installs[2]) is int and type(installs[1]) is int and 0 <= installs[1] <= installs[2]:
-                        metrics['installs'] = installs[2]
-                    if scores and scores[0] and len(scores[0]) > 1:
-                        rating = scores[0][1]
-                        if type(rating) in (int, float) and 0 < rating <= 5:
-                            metrics['rating'] = rating
-                    if metrics:
-                        details[package].update(metrics, metrics_checked_at=int(time.time()))
-                        seen += 1
-                except (ValueError, TypeError, IndexError, KeyError, AttributeError):
-                    continue
-    except (OSError, ValueError, TypeError):
-        pass
-    print(json.dumps({'phase': 'play_metrics', 'requested': len(packages), 'received': seen}), flush=True)
+                    metrics.update(release_ts=stamp, play_status='ok')
+                if isinstance(installs, list) and len(installs) >= 3 and type(installs[2]) is int and type(installs[1]) is int and 0 <= installs[1] <= installs[2] <= 9007199254740991:
+                    metrics['installs'] = installs[2]
+                if scores and scores[0] and len(scores[0]) > 1:
+                    rating = scores[0][1]
+                    if type(rating) in (int, float) and 0 < rating <= 5:
+                        metrics['rating'] = rating
+                results[package] = metrics
+            except (ValueError, TypeError, IndexError, KeyError, AttributeError):
+                continue
+    return results
+
+
+def fetch_play_metrics(http, packages):
+    from urllib.parse import urlencode
+    if not packages:
+        return {}
+    calls = [['Ws7gDc', json.dumps([None, None, [[11, 14, 52]], None, None, [[p, 7]]]), None, p] for p in packages]
+    url = 'https://play.google.com/_/PlayStoreUi/data/batchexecute?rpcids=Ws7gDc&hl=en&gl=US&rt=c'
+    payload = urlencode({'f.req': json.dumps([calls])}).encode()
+    raw = http.request(url, 'play.google.com', payload, headers={'Content-Type': 'application/x-www-form-urlencoded'}, maximum=2_000_000, reserve=10, timeout=20)
+    try:
+        return parse_play_metrics(raw, packages, int(time.time()))
+    except (ValueError, TypeError):
+        raise SyncError('Google Play returned an invalid batch', 'play.google.com') from None
+
+
+def attach_play_metrics(http, details):
+    packages = [p for p, detail in details.items() if isinstance(detail, dict)]
+    try:
+        results = fetch_play_metrics(http, packages)
+    except SyncError:
+        results = {}
+    for package, metrics in results.items():
+        details[package].update(metrics)
+    print(json.dumps({'phase': 'play_metrics', 'requested': len(packages), 'received': len(results), 'release_dates': sum(r.get('release_ts') is not None for r in results.values())}), flush=True)
+
+
+def release_dates(http, credential, run, batches=None):
+    number = stored = dated = 0
+    while http.deadline - time.monotonic() > 40 and (batches is None or number < batches):
+        base = {'scope': 'release_dates', 'run_id': run, 'claim_id': f'{run}-dates-{number}'}
+        claim = http.website(METADATA, {'action': 'claim', **base, 'limit': 50}, credential, metadata=True)
+        packages = claim.get('packages')
+        if not isinstance(packages, list) or len(packages) > 50 or len(set(packages)) != len(packages) or any(not isinstance(p, str) or not PACKAGE.fullmatch(p) for p in packages):
+            raise SyncError('Invalid release date claim', 'website')
+        if not packages:
+            return {'idle': True, 'batches': number, 'stored': stored, 'dated': dated, 'remaining': claim.get('remaining')}
+        try:
+            results = fetch_play_metrics(http, packages)
+        except SyncError as error:
+            # Persist the failure as retryable; do not count a transport error as unavailable.
+            http.website(METADATA, {'action': 'submit', **base, 'results': {}, 'failed_packages': packages}, credential, metadata=True)
+            print(json.dumps({'phase': 'release_dates', 'checkpointed': True, 'retry_pending': len(packages), 'upstream_status': error.status}), flush=True)
+            return {'checkpointed': True, 'retry_pending': len(packages), 'batches': number}
+        reply = http.website(METADATA, {'action': 'submit', **base, 'results': results, 'failed_packages': [p for p in packages if p not in results]}, credential, metadata=True)
+        number += 1; stored += reply['stored']; dated += reply['dated']
+        print(json.dumps({'phase': 'release_dates', 'batches': number, **reply}), flush=True)
+        time.sleep(.5)
+    return {'batches': number, 'stored': stored, 'dated': dated, 'checkpointed': True}
 
 
 def sync_metadata(http, credential, run, batches):
