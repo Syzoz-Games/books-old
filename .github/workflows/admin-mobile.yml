@@ -1,0 +1,38 @@
+name: Admin mobile catalog
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Catalog stage to run
+        type: choice
+        options: [all, sitemaps, metadata]
+        default: all
+      seconds:
+        description: Bounded runtime in seconds (60-1800)
+        type: string
+        default: '900'
+      metadata_batches:
+        description: Maximum 50-game metadata batches (0-200)
+        type: string
+        default: '20'
+permissions:
+  contents: read
+concurrency:
+  group: production-game-catalog
+  cancel-in-progress: false
+jobs:
+  mobile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Sync through ordinary HTTP
+        env:
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
+          SYNC_MODE: ${{ inputs.mode }}
+          SYNC_SECONDS: ${{ inputs.seconds }}
+          METADATA_BATCHES: ${{ inputs.metadata_batches }}
+        run: python apkpure/admin_mobile.py --mode "$SYNC_MODE" --seconds "$SYNC_SECONDS" --metadata-batches "$METADATA_BATCHES"
