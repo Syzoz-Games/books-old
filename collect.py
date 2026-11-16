@@ -449,8 +449,13 @@ def store_catalog_page(start, deadline, count=100, include_listings=False):
   appid=item.get('appid',item.get('id')) if isinstance(item,dict) else None
   listing_id=item.get('id') if isinstance(item,dict) else None
   if type(listing_id) is not int or not 1<=listing_id<=MAX_APP_ID or listing_id in listing_ids:raise RuntimeError('Invalid or duplicate Store listing identity')
-  if not isinstance(item,dict) or item.get('success')!=1 or item.get('type')!=0 or item.get('item_type')!=0 or type(appid) is not int or not 1<=appid<=MAX_APP_ID or not isinstance(item.get('name'),str) or not item['name'].strip():raise RuntimeError('Invalid Store game identity')
-  listing_ids.add(listing_id);listings.append({'id':listing_id,'appid':appid})
+  if item.get('success')!=1 or type(item.get('type')) is not int or item['type']<0 or item.get('item_type')!=0 or type(appid) is not int or not 1<=appid<=MAX_APP_ID or not isinstance(item.get('name'),str):raise RuntimeError('Invalid Store game identity')
+  # The published query includes unnamed games and non-game apps despite its
+  # games filter. Audit their listing identities without inventing game rows.
+  listing={'id':listing_id,'appid':appid};listing_ids.add(listing_id);listings.append(listing)
+  if item['type']!=0 or not item['name'].strip():
+   listing.update(outcome='non_game' if item['type']!=0 else 'unnamed',app_type=item['type'])
+   continue
   if appid in seen:continue
   seen.add(appid);records.append(normalize(appid,{'common':{'name':item['name'],'type':'game'}}))
  if [r['id'] for r in listings]!=sorted(r['id'] for r in listings):raise RuntimeError('Store catalog order changed; page retained for retry')
