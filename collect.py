@@ -2,6 +2,7 @@
 import argparse,base64,gzip,json,os,re,time,urllib.request,urllib.error,urllib.parse
 from pathlib import Path
 from contextlib import nullcontext
+from datetime import datetime,timezone
 from steam.client import SteamClient
 from steam.enums import EResult
 from gevent import Timeout
@@ -32,11 +33,22 @@ def initial():return {'cursor':1,'scan_pass':1,'change_number':0,'pending_change
 def timestamp(v):
  try:n=int(v);return n if 0<n<MAX_APP_ID else None
  except (ValueError,TypeError):return None
+def public_update(data):
+ result={'updated_date':None,'updated_source':None};depots=data.get('depots')
+ if not isinstance(depots,dict):return result
+ branches=depots.get('branches')
+ if not isinstance(branches,dict) or not isinstance(branches.get('public'),dict):return result
+ public=branches['public'];key='timebuildupdated' if 'timebuildupdated' in public else 'timeupdated';value=public.get(key)
+ if type(value) is not int and not (isinstance(value,str) and value.isascii() and value.isdecimal()):return result
+ try:seconds=int(value)
+ except ValueError:return result
+ if not 1063324800<=seconds<=int(time.time())+300:return result
+ return {'updated_date':datetime.fromtimestamp(seconds,timezone.utc).isoformat().replace('+00:00','Z'),'updated_source':'steam_public_build' if key=='timebuildupdated' else 'steam_public_branch'}
 def normalize(appid,data):
  c=data.get('common') or {};name=c.get('name');kind=str(c.get('type','unknown')).lower()
  if not name:return None
  associations=c.get('associations') or {};developers=[x.get('name','') for x in associations.values() if isinstance(x,dict) and x.get('type')=='developer'] if isinstance(associations,dict) else []
- return {'appid':int(appid),'name':str(name)[:500],'type':kind,'release_ts':timestamp(c.get('steam_release_date')),'original_release_ts':None,'coming_soon':c.get('releasestate')=='prerelease','windows':'windows' in str(c.get('oslist','')).lower(),'developer':', '.join(developers)[:500],'icon':'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/'+str(appid)+'/header.jpg','restricted':bool(data.get('_missing_token',False)),'is_free':None,'installs':None,'installs_max':None,'installs_estimated':None,'installs_source':None,'installs_checked_at':None,'rating':None,'rating_count':None,'rating_source':None,'rating_checked_at':None}
+ return {'appid':int(appid),'name':str(name)[:500],'type':kind,'release_ts':timestamp(c.get('steam_release_date')),'original_release_ts':None,'coming_soon':c.get('releasestate')=='prerelease','windows':'windows' in str(c.get('oslist','')).lower(),'developer':', '.join(developers)[:500],'icon':'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/'+str(appid)+'/header.jpg','restricted':bool(data.get('_missing_token',False)),'is_free':None,'installs':None,'installs_max':None,'installs_estimated':None,'installs_source':None,'installs_checked_at':None,'rating':None,'rating_count':None,'rating_source':None,'rating_checked_at':None,**public_update(data)}
 def store_dates(records,deadline=None):
  # Commerce applies to every named game, including records already dated by PICS.
  # Only an explicit StoreBrowse boolean classifies free/paid; missing is unknown.
