@@ -396,7 +396,8 @@ def main(argv=None):
     parser.add_argument('--metadata-batches', type=int, default=20)
     args = parser.parse_args(argv)
     try:
-        if not 60 <= args.seconds <= 1800 or not 0 <= args.metadata_batches <= 200:
+        max_seconds = 21300 if args.mode == "metadata" else 1800
+        if not 60 <= args.seconds <= max_seconds or not 0 <= args.metadata_batches <= 200:
             raise SyncError('Invalid bounded runtime or metadata batch count', 'configuration')
         credential = catalog_credential(os.environ.get('STEAM_SYNC_TOKEN'))
         run = os.environ.get('GITHUB_RUN_ID', '') + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1')
