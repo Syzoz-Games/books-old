@@ -123,7 +123,7 @@ def steam_work(m,args,plan):
   m.send_catalog_batch(page,base,{**base,'page_done':True},records,details,'',max_body=5_400_000)
   next_offset=page.receipt.get('next_offset')
   if type(next_offset) is not int or next_offset!=offset+100*plan['workers']:raise ValueError('Invalid Steam page receipt')
-  print(json.dumps({'worker':args.worker,'offset':offset,'next_offset':next_offset,'games':len(records)}),flush=True);offset=next_offset
+  print(json.dumps({'worker':args.worker,'offset':offset,'next_offset':next_offset,'games':len(records),'exceptions':[r for r in listings if 'outcome' in r]}),flush=True);offset=next_offset
  return {'worker':args.worker,'next_offset':offset,'checkpointed':True}
 
 def steam_finish(m,args,plan):
