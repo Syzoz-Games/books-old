@@ -29,10 +29,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Sync through ordinary HTTP
+      - name: Start sitemap browser
+        if: inputs.mode != 'metadata'
+        run: |
+          docker pull ghcr.io/flaresolverr/flaresolverr:latest
+          docker run -d --name mobile-solver --shm-size=1g --tmpfs /tmp:exec,mode=1777,size=1G -p 127.0.0.1:8191:8191 -e LOG_LEVEL=INFO ghcr.io/flaresolverr/flaresolverr:latest
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent --max-time 2 --output /dev/null http://127.0.0.1:8191/; then exit 0; fi
+            sleep 1
+          done
+          docker logs mobile-solver
+          exit 1
+      - name: Sync mobile catalog with FlareSolverr sitemaps
         env:
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
           SYNC_MODE: ${{ inputs.mode }}
           SYNC_SECONDS: ${{ inputs.seconds }}
           METADATA_BATCHES: ${{ inputs.metadata_batches }}
         run: python apkpure/admin_mobile.py --mode "$SYNC_MODE" --seconds "$SYNC_SECONDS" --metadata-batches "$METADATA_BATCHES"
+      - name: Remove sitemap browser
+        if: always() && inputs.mode != 'metadata'
+        run: docker rm -f mobile-solver || true
