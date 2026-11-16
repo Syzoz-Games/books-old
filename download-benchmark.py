@@ -57,7 +57,7 @@ def plan():
         for shard in range(50):
             key = len(groups)
             groups.append(ids[50*shard:50*(shard+1)])
-            matrix.append({'index':key,'provider':provider,'slots':[10,20,50][shard%3]})
+            matrix.append({'index':key,'provider':provider,'slots':50})
     Path('groups.json').write_text(json.dumps(groups))
     with open(os.environ['GITHUB_OUTPUT'],'a') as f:
         print('matrix='+json.dumps({'include':matrix},separators=(',',':')),file=f)
@@ -118,7 +118,16 @@ def summarize():
                 counts=Counter()
                 for r in group:counts.update(r['outcomes'])
                 print(f"| {provider} | {slots} | {len(group)} | {statistics.median(r['seconds'] for r in group):.3f} | {max(r['peak_in_flight'] for r in group)} | {counts['valid']} | {counts['unavailable']} | {sum(counts.values())-counts['valid']-counts['unavailable']} | {statistics.median(r['bytes'] for r in group)/1e6:.2f} |",file=out)
-    if len({r['index'] for r in rows})!=100:raise SystemExit('Incomplete benchmark')
+        for provider in ['apkpure','steam']:
+            subset = [r for r in rows if r['provider'] == provider]
+            reached = sum(r['peak_in_flight'] == 50 for r in subset)
+            print(f"\n{provider}: {reached} of {len(subset)} jobs reached 50 in-flight requests.", file=out)
+    if len(rows) != 100 or {r['index'] for r in rows} != set(range(100)):
+        raise SystemExit('Incomplete benchmark')
+    for provider in ['apkpure','steam']:
+        subset = [r for r in rows if r['provider'] == provider]
+        if len(subset) != 50 or any(r['slots'] != 50 or sum(r['outcomes'].values()) != 50 for r in subset):
+            raise SystemExit('Unexpected job configuration or request count')
 
 if __name__=='__main__':
     {'plan':plan,'download':download,'summarize':summarize}[sys.argv[1]]()
