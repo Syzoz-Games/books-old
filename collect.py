@@ -432,7 +432,7 @@ def owner_phase(tr,state,deadline,engine_seconds=0):
 
 def store_catalog_page(start, deadline, count=100):
  if type(start) is not int or start<0 or type(count) is not int or not 1<=count<=100:raise ValueError('Invalid Store catalog page')
- payload={'query_name':'syzoz_public_catalog','query':{'start':start,'count':count,'sort':0,'filters':{'type_filters':{'include_games':True}}},'context':{'language':'english','country_code':'US'},'data_request':{'include_basic_info':True}}
+ payload={'query_name':'syzoz_public_catalog_appid_v1','query':{'start':start,'count':count,'sort':2,'filters':{'type_filters':{'include_games':True}}},'context':{'language':'english','country_code':'US'},'data_request':{'include_basic_info':True}}
  remaining=deadline-time.monotonic()
  if remaining<=2:raise RuntimeError('Store catalog deadline reached')
  url='https://api.steampowered.com/IStoreQueryService/Query/v1/?'+urllib.parse.urlencode({'input_json':json.dumps(payload)})
@@ -449,12 +449,14 @@ def store_catalog_page(start, deadline, count=100):
   appid=item.get('appid',item.get('id')) if isinstance(item,dict) else None
   if not isinstance(item,dict) or item.get('success')!=1 or item.get('type')!=0 or item.get('item_type')!=0 or type(appid) is not int or not 1<=appid<=MAX_APP_ID or not isinstance(item.get('name'),str) or not item['name'].strip() or appid in seen:raise RuntimeError('Invalid or duplicate Store game identity')
   seen.add(appid);records.append(normalize(appid,{'common':{'name':item['name'],'type':'game'}}))
+ if [r['appid'] for r in records]!=sorted(r['appid'] for r in records):raise RuntimeError('Store catalog order changed; page retained for retry')
  details=store_dates(records,deadline=deadline,include_details=True)
  if {r['appid'] for r in records}!={r['appid'] for r in details}:raise RuntimeError('Store catalog details incomplete; page retained for retry')
  next_start=start+len(items)
  return records,details,next_start,total,next_start>=total
 
 def scan_store_catalog(tr, state, deadline):
+ if state.get('store_catalog_sort')!=2:state.update(store_catalog_start=0,store_catalog_complete=False,store_catalog_sort=2)
  if state.get('store_catalog_complete'):
   state.update(store_catalog_start=0,store_catalog_complete=False)
  state.setdefault('store_catalog_start',0)
