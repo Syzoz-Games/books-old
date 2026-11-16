@@ -11,7 +11,7 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,4 +22,4 @@ jobs:
         env:
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
           STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
-        run: python collect.py --seconds 1500 --batch 1000
+        run: python collect.py --seconds 21600 --batch 1000
