@@ -8,9 +8,9 @@ on:
         options: [collect, enrich]
         default: collect
       seconds:
-        description: Bounded total runtime (60-1800 seconds)
+        description: Bounded total runtime (60-21300 seconds)
         type: string
-        default: '1500'
+        default: '21300'
       owners_seconds:
         description: Ownership and engine backlog budget (0-600 seconds)
         type: string
@@ -27,7 +27,7 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -39,7 +39,7 @@ jobs:
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
           STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
           SYNC_MODE: ${{ inputs.mode || 'collect' }}
-          SYNC_SECONDS: ${{ inputs.seconds || '1500' }}
+          SYNC_SECONDS: ${{ inputs.seconds || '21300' }}
           OWNERS_SECONDS: ${{ inputs.owners_seconds || '300' }}
           ENGINE_SECONDS: ${{ inputs.engine_seconds || '60' }}
         run: |
