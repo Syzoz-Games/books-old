@@ -1,5 +1,5 @@
 """Manual GitHub-only bounded JSON benchmark. No production catalog writes."""
-import argparse,hashlib,io,json,math,os,re,sys,time,urllib.error,urllib.parse,urllib.request
+import argparse,hashlib,io,json,math,os,re,shutil,sys,time,urllib.error,urllib.parse,urllib.request
 from pathlib import Path
 from unittest.mock import patch
 MAX_ID=2**32-1
@@ -247,6 +247,7 @@ def public_receiver_error(raw,token=''):
  if token:message=message.replace(token,'[redacted]')
  return ''.join(c for c in message if c.isprintable())[:240]
 class IsolatedReceiver:
+ marker='test'
  def __init__(self,url,token,github,seconds=240):
   parsed=urllib.parse.urlsplit(url)
   if parsed.scheme!='https' or parsed.netloc!='syzoz.com' or parsed.path!='/game-explorer/steam-sync.php' or parsed.query or parsed.fragment:raise BatchError('Unexpected isolated receiver URL')
@@ -266,14 +267,14 @@ class IsolatedReceiver:
     if not isinstance(result,dict):raise BatchError('Isolated receipt is not an object')
     expected=hashlib.sha256(raw).hexdigest()
     # Exact receipt shape is shared by all isolated actions.
-    if result.get('test') is not True or result.get('action')!=action or result.get('github')!=self.github or result.get('payload_hash')!=expected:raise BatchError('Isolated receipt identity or request hash mismatch')
-    if action=='test-batch' and result.get('chunk_index')!=fields.get('chunk_index'):raise BatchError('Isolated receipt chunk mismatch')
+    if result.get(self.marker) is not True or result.get('action')!=action or result.get('github')!=self.github or result.get('payload_hash')!=expected:raise BatchError('Isolated receipt identity or request hash mismatch')
+    if action in ('test-batch','manifest-batch') and result.get('chunk_index')!=fields.get('chunk_index'):raise BatchError('Isolated receipt chunk mismatch')
     return result
    except urllib.error.HTTPError as error:
     code=error.code
     try:message=public_receiver_error(error.read(4097),self.token)
     finally:error.close()
-    if code<500 or attempt==2:raise BatchError('Isolated receiver returned HTTP '+str(code)+(': '+message if message else '')) from None
+    if code<500 or attempt==2:raise BatchError('Steam receiver returned HTTP '+str(code)+(': '+message if message else '')) from None
    except (ValueError,OSError):
     if attempt==2:raise BatchError('Isolated receiver unavailable or invalid JSON') from None
    time.sleep(attempt+1)
@@ -288,6 +289,67 @@ def upload_isolated(receiver,manifest,data):
  if finish.get('complete') is not True or finish.get('success') is not True:raise BatchError('Isolated receiver reported incomplete or failed source coverage')
  return {'begin':begin,'chunks':receipts,'finish':finish}
 
+class ProductionReceiver(IsolatedReceiver):
+ marker='production'
+def production_manifest(client,receiver,limit,logical_workers,runners,github,include_unreleased=False,reuse=None):
+ state=receiver.call('manifest-state');checkpoint=state.get('query_checkpoint');pending=state.get('pending');receiver.replay_only=pending is not None
+ if pending is not None and (not isinstance(pending,dict) or pending.get('github')!=github):raise BatchError('Another incomplete production manifest requires explicit recovery')
+ if reuse is not None:
+  validate_manifest(reuse,github)
+  if not isinstance(reuse.get('production'),dict):raise BatchError('Replay artifact is not a production manifest')
+  receiver.replay_only=receiver.replay_only or reuse['production'].get('expected_checkpoint')!=checkpoint
+  return reuse
+ if pending is not None:raise BatchError('Reuse the immutable manifest artifact to replay this production run')
+ start=0
+ if checkpoint is not None:
+  if not isinstance(checkpoint,dict) or type(checkpoint.get('next_start')) is not int or type(checkpoint.get('include_unreleased')) is not bool:raise BatchError('Production query checkpoint is invalid')
+  if checkpoint.get('exhausted') is True:raise BatchError('Production scope is exhausted; explicit reconciliation/reset is required')
+  if include_unreleased and not checkpoint['include_unreleased']:raise BatchError('Production query scope cannot change during continuation')
+  start=checkpoint['next_start'];include_unreleased=checkpoint['include_unreleased']
+ manifest=plan_manifest(client,limit,logical_workers,runners,github,start=start,include_unreleased=include_unreleased)
+ manifest.pop('manifest_hash');manifest['production']={'expected_checkpoint':checkpoint};manifest['manifest_hash']=digest(manifest);return manifest
+
+def upload_production(receiver,manifest,data):
+ production=manifest.get('production');planning=manifest.get('planning')
+ if not isinstance(production,dict) or 'expected_checkpoint' not in production or not isinstance(planning,dict):raise BatchError('Production finalizer requires a server-checkpoint-bound manifest')
+ chunks=isolated_chunks(manifest,data);begin=receiver.call('manifest-begin',manifest={**{key:manifest[key] for key in ('schema','appids','logical_workers','runners')},'planning':{key:planning[key] for key in ('start','next_start','exhausted','include_unreleased','query_scope')}},expected_checkpoint=production['expected_checkpoint']);receipts=[]
+ for index,chunk in enumerate(chunks):
+  payload={'chunk_index':index,'records':chunk['records'],'details':chunk['details'],'outcomes':chunk['outcomes']}
+  if chunk['history']:payload['install_history']={'schema':1,'mode':'merge','games':chunk['history']}
+  receipts.append(receiver.call('manifest-batch',**payload))
+ finish=receiver.call('manifest-finish')
+ if finish.get('complete') is not True or finish.get('success') is not True:raise BatchError('Production receiver reported incomplete or failed source coverage')
+ return {'begin':begin,'chunks':receipts,'finish':finish}
+
+def runner_mode(directory,runner,replay_only=False):
+ report_path=Path(directory)/('runner-%d.json'%runner)
+ if report_path.exists():
+  try:report=json.loads(report_path.read_text())
+  except (OSError,ValueError):report={}
+  if isinstance(report,dict) and report.get('status')=='complete':return 'replay'
+ if replay_only:raise BatchError('Pending production chunks require original COMPLETE immutable runner artifacts; no source refetch is allowed')
+ return 'collect'
+
+def replay_runner(manifest,runner,directory,output):
+ # Copy only complete immutable artifacts; never refetch products after a
+ # partially uploaded production run, since new bytes would break replay.
+ validate_manifest(manifest);selected=assigned_shards(manifest,runner);copies=[]
+ for shard,ids in selected:
+  path=Path(directory)/('shard-%03d.json'%shard)
+  if not path.exists():raise BatchError('Replay requires every completed assigned shard artifact')
+  row=json.loads(path.read_text());outcomes=row.get('outcomes');actual=[v.get('appid') for v in outcomes] if isinstance(outcomes,list) else []
+  if row.get('schema')!=1 or row.get('github')!=manifest['github'] or row.get('manifest_hash')!=manifest['manifest_hash'] or row.get('shard')!=shard or row.get('appids')!=ids or len(actual)!=len(ids) or set(actual)!=set(ids):raise BatchError('Replay shard is incomplete or belongs to another manifest')
+  copies.append(path)
+ report_path=Path(directory)/('runner-%d.json'%runner)
+ if not report_path.exists():raise BatchError('Replay runner receipt is missing')
+ report=json.loads(report_path.read_text())
+ if report.get('github')!=manifest['github'] or report.get('manifest_hash')!=manifest['manifest_hash'] or report.get('runner')!=runner or report.get('status')!='complete' or sorted(report.get('completed_shards',[]))!=[shard for shard,ids in selected]:raise BatchError('Replay runner receipt is incomplete')
+ copies.append(report_path);Path(output).mkdir(parents=True,exist_ok=True)
+ for path in copies:
+  target=Path(output)/path.name
+  if path.resolve()!=target.resolve():shutil.copyfile(path,target)
+ return report
+
 def load_worker():
  if __package__:from . import collect
  else:import collect
@@ -295,30 +357,45 @@ def load_worker():
 
 def main(argv=None):
  parser=argparse.ArgumentParser(description=__doc__);sub=parser.add_subparsers(dest='command',required=True)
- p=sub.add_parser('plan');p.add_argument('--limit',type=int,default=1000);p.add_argument('--logical-workers',type=int,default=100);p.add_argument('--runners',type=int,default=2);p.add_argument('--seconds',type=int,default=240);p.add_argument('--output',type=Path,default=Path('manifest.json'));p.add_argument('--start',type=int,default=0);p.add_argument('--include-unreleased',action='store_true');p.add_argument('--resume-manifest',type=Path)
+ p=sub.add_parser('plan');p.add_argument('--limit',type=int,default=1000);p.add_argument('--logical-workers',type=int,default=100);p.add_argument('--runners',type=int,default=2);p.add_argument('--seconds',type=int,default=240);p.add_argument('--output',type=Path,default=Path('manifest.json'));p.add_argument('--start',type=int,default=0);p.add_argument('--include-unreleased',action='store_true');p.add_argument('--resume-manifest',type=Path);p.add_argument('--production',action='store_true');p.add_argument('--reuse-manifest',type=Path)
  p=sub.add_parser('work');p.add_argument('--manifest',type=Path,required=True);p.add_argument('--runner',type=int,required=True);p.add_argument('--seconds',type=int,default=600);p.add_argument('--owners-limit',type=int,default=0);p.add_argument('--output',type=Path,default=Path('batch-results'));p.add_argument('--engine-seconds',type=int,default=20);p.add_argument('--engine-fallbacks',action='store_true')
- p=sub.add_parser('finalize');p.add_argument('--manifest',type=Path,required=True);p.add_argument('--directory',type=Path,required=True);p.add_argument('--output',type=Path,default=Path('batch-final-result.json'));p.add_argument('--upload',action='store_true')
+ p=sub.add_parser('finalize');p.add_argument('--manifest',type=Path,required=True);p.add_argument('--directory',type=Path,required=True);p.add_argument('--output',type=Path,default=Path('batch-final-result.json'));p.add_argument('--upload',action='store_true');p.add_argument('--production',action='store_true')
+ p=sub.add_parser('replay');p.add_argument('--manifest',type=Path,required=True);p.add_argument('--runner',type=int,required=True);p.add_argument('--directory',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
  args=parser.parse_args(argv)
  try:
   github=github_metadata(os.environ)
   if args.command=='plan':
    if not 1<=args.seconds<=240:raise BatchError('Planner budget must be <=240 seconds')
-   resume=json.loads(args.resume_manifest.read_text()) if args.resume_manifest else None;result=plan_manifest(JsonClient(args.seconds,.5),args.limit,args.logical_workers,args.runners,github,args.start,args.include_unreleased,resume);write_json(args.output,result);print(compact({'planned':len(result['appids']),'manifest_hash':result['manifest_hash'],'logical_workers':result['logical_workers'],'runners':result['runners']}).decode())
+   resume=json.loads(args.resume_manifest.read_text()) if args.resume_manifest else None
+   if args.production:
+    if args.start!=0 or resume is not None:raise BatchError('Production planning uses only the server-owned query checkpoint')
+    receiver=ProductionReceiver(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/game-explorer/steam-sync.php'),os.environ.get('STEAM_SYNC_TOKEN',''),github);reuse=json.loads(args.reuse_manifest.read_text()) if args.reuse_manifest else None;result=production_manifest(JsonClient(args.seconds,.5),receiver,args.limit,args.logical_workers,args.runners,github,args.include_unreleased,reuse)
+   else:
+    if args.reuse_manifest:raise BatchError('Exact-run manifest reuse is reserved for production replay')
+    result=plan_manifest(JsonClient(args.seconds,.5),args.limit,args.logical_workers,args.runners,github,args.start,args.include_unreleased,resume)
+   write_json(args.output,result);print(compact({'planned':len(result['appids']),'manifest_hash':result['manifest_hash'],'logical_workers':result['logical_workers'],'runners':result['runners']}).decode())
    if os.environ.get('GITHUB_OUTPUT'):
-    with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('matrix='+json.dumps({'runner':list(range(result['runners']))},separators=(',',':'))+'\n')
+    with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('matrix='+json.dumps({'runner':list(range(result['runners']))},separators=(',',':'))+'\n');f.write('replay_only='+('true' if args.production and receiver.replay_only else 'false')+'\n')
   elif args.command=='work':
    manifest=json.loads(args.manifest.read_text());validate_manifest(manifest,github)
    if not 1<=args.seconds<=900 or not 0<=args.owners_limit<=60 or not 0<=args.engine_seconds<=60:raise BatchError('Worker <=900 seconds; optional owners <=60 and engine seconds <=60 required')
    result=run_shards(load_worker(),JsonClient(args.seconds,max(1,manifest['runners']),slot=args.runner),manifest,args.runner,args.output,args.owners_limit,args.engine_seconds,args.engine_fallbacks);print(compact({k:result[k] for k in ('runner','status','coverage','owners_attempted')}).decode())
    if result['status']!='complete':return 1
+  elif args.command=='replay':
+   manifest=json.loads(args.manifest.read_text());validate_manifest(manifest,github);result=replay_runner(manifest,args.runner,args.directory,args.output);print(compact({'status':'replayed_immutable_artifacts','runner':args.runner}).decode())
   else:
    manifest=json.loads(args.manifest.read_text());validate_manifest(manifest,github);data=merged_shards(manifest,args.directory);result={'status':'staged','github':github,'manifest_hash':manifest['manifest_hash'],'planned':len(manifest['appids']),'records':len(data['records']),'details':len(data['details']),'outcomes':len(data['outcomes']),'production_writes':0,'coverage':{field:sum(row.get(field) is not None and row.get(field)!='' for row in data['records']) for field in ('icon','is_free','price','release_ts','updated_date','version','size','category','tags','rating','description','iap','architectures','installs')},'media_coverage':{field:sum(bool(row.get(field)) for row in data['details']) for field in ('screenshots','trailers')}}
-   if args.upload:
+   if args.production and not args.upload:raise BatchError('Production finalization requires explicit upload mode')
+   if args.upload and args.production:
+    receiver=ProductionReceiver(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/game-explorer/steam-sync.php'),os.environ.get('STEAM_SYNC_TOKEN',''),github);result['production_upload']=upload_production(receiver,manifest,data);result['status']='published_production_manifest';result['production_writes']=len(data['records'])
+   elif args.upload:
     receiver=IsolatedReceiver(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/game-explorer/steam-sync.php'),os.environ.get('STEAM_SYNC_TOKEN',''),github);result['isolated_upload']=upload_isolated(receiver,manifest,data);result['status']='uploaded_to_isolated_run'
    write_json(args.output,result);print(compact(result).decode())
   return 0
  except (BatchError,ValueError,OSError) as error:
   failure={'status':'failed','error':str(error)[:250],'production_writes':0}
+  if args.command=='finalize' and args.production:
+   failure.pop('production_writes');failure.update(production_write_count=None,partial_commits_possible=True,resume='Re-run only the failed finalizer with the original immutable manifest and runner artifacts; do not refetch or reset the query checkpoint')
   if args.command=='finalize':write_json(args.output,failure)
   print(compact(failure).decode(),file=sys.stderr);return 1
 if __name__=='__main__':raise SystemExit(main())
