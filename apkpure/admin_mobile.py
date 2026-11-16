@@ -255,6 +255,17 @@ def sync_sitemaps(http, credential, run, metadata_batches=0):
     finally:
         browser.close()
 
+def metadata_version(value):
+    if type(value) is int or type(value) is float and float('-inf') < value < float('inf'):
+        value = str(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        value.encode('utf-8')
+    except UnicodeError:
+        return None
+    return value[:200]
+
 def metadata_detail(detail, package):
     if detail is None:
         return None
@@ -263,6 +274,8 @@ def metadata_detail(detail, package):
     # Send exactly the existing record-date index fields; no unrelated binary/download blobs.
     fields = ('package_name', 'create_date', 'update_date', 'title', 'developer', 'version_name', 'description_short', 'icon_url')
     out = {key: detail[key] for key in fields if key in detail}
+    if 'version_name' in out:
+        out['version_name'] = metadata_version(out['version_name'])
     if isinstance(detail.get('asset'), dict) and 'size' in detail['asset']:
         out['asset'] = {'size': detail['asset']['size']}
     if isinstance(detail.get('icon'), dict) and isinstance(detail['icon'].get('thumbnail'), dict) and 'url' in detail['icon']['thumbnail']:
