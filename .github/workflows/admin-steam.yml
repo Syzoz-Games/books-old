@@ -1,0 +1,23 @@
+name: Admin catalog sync · Steam
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: steam-production-collector
+  cancel-in-progress: false
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Resume anonymous collection
+        env:
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
+          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+        run: python collect.py --seconds 1500 --batch 1000
