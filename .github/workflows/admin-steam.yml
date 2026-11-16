@@ -25,7 +25,85 @@ concurrency:
   group: steam-production-collector
   cancel-in-progress: false
 jobs:
+  prepare:
+    name: Prepare shared Steam plan
+    if: ${{ inputs.mode != 'enrich' }}
+    outputs:
+      artifact: steam-work-plan-${{ github.run_attempt }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Plan resumable catalog partitions
+        env:
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
+          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+          SYNC_SECONDS: ${{ inputs.seconds || '21300' }}
+          OWNERS_SECONDS: ${{ inputs.owners_seconds || '300' }}
+          ENGINE_SECONDS: ${{ inputs.engine_seconds || '60' }}
+        run: python parallel_catalog.py plan --provider steam
+      - uses: actions/upload-artifact@v4
+        with:
+          name: steam-work-plan-${{ github.run_attempt }}
+          path: work-plan.json
+          if-no-files-found: error
+  workers:
+    name: Steam worker ${{ matrix.worker }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        worker: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.artifact }}
+      - name: Download and process assigned catalog pages
+        env:
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
+          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+          SYNC_SECONDS: ${{ inputs.seconds || '21300' }}
+          OWNERS_SECONDS: ${{ inputs.owners_seconds || '300' }}
+          ENGINE_SECONDS: ${{ inputs.engine_seconds || '60' }}
+        run: python parallel_catalog.py work --provider steam --worker "${{ matrix.worker }}" --seconds "$SYNC_SECONDS" --engine-seconds "$ENGINE_SECONDS"
+  finalize:
+    name: Save shared Steam checkpoint and enrichment
+    needs: [prepare, workers]
+    if: ${{ always() && !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.artifact }}
+      - name: Finalize checkpoints and saved-game estimates
+        env:
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
+          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+          SYNC_SECONDS: ${{ inputs.seconds || '21300' }}
+          OWNERS_SECONDS: ${{ inputs.owners_seconds || '300' }}
+          ENGINE_SECONDS: ${{ inputs.engine_seconds || '60' }}
+        run: python parallel_catalog.py finish --provider steam --owners-seconds "$OWNERS_SECONDS" --engine-seconds "$ENGINE_SECONDS"
   collect:
+    name: Saved-game enrichment
+    if: ${{ inputs.mode == 'enrich' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
