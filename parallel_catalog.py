@@ -15,7 +15,9 @@ def credential(provider, module):
 def mobile_plan(m, args, run):
  token=credential('mobile',m);http=m.Http(args.seconds)
  plan={'schema':1,'provider':'mobile','workers':10,'run_id':run,'mode':args.mode,'pending':[]}
- if args.mode!='metadata':
+ if args.mode in ('all','release_dates'):
+  http.website(m.METADATA,{'scope':'release_dates','action':'seed','run_id':run,'claim_id':run+'-seed'},token)
+ if args.mode not in ('metadata','release_dates'):
   browser=m.SitemapBrowser(http)
   try:
    root=browser.fetch(m.INDEX,'sitemapindex');manifest={}
@@ -34,7 +36,9 @@ def mobile_plan(m, args, run):
  return plan
 
 def mobile_work(m,args,plan):
- token=credential('mobile',m);http=m.Http(args.seconds);browser=m.SitemapBrowser(http);round_number=0
+ token=credential('mobile',m);http=m.Http(args.seconds)
+ if plan['mode']=='release_dates':return m.release_dates(http,token,f"{plan['run_id']}-worker-{args.worker}")
+ browser=m.SitemapBrowser(http);round_number=0
  def metadata():
   nonlocal round_number
   if plan['mode']=='sitemaps' or not args.metadata_batches:return {'batches':0,'stored':0,'dated':0}
@@ -62,10 +66,12 @@ def mobile_work(m,args,plan):
   while http.deadline-time.monotonic()>60:
    result=metadata()
    if not result['batches']:break
+  if plan['mode']=='all' and http.deadline-time.monotonic()>40:m.release_dates(http,token,f"{plan['run_id']}-worker-{args.worker}")
  finally:browser.close()
  return {'worker':args.worker,'checkpointed':True}
 
 def mobile_finish(m,args,plan):
+ if plan['mode']=='release_dates':return m.Http(120).website(m.METADATA,{'scope':'release_dates','action':'status','run_id':plan['run_id'],'claim_id':plan['run_id']+'-status'},credential('mobile',m))
  if plan['mode']=='metadata':return {'metadata':'workers finished; any deferred claims remain queued'}
  token=credential('mobile',m);http=m.Http(900)
  payload={'run_id':plan['run_id']}
@@ -132,7 +138,7 @@ def main():
  parser=argparse.ArgumentParser(description=__doc__)
  parser.add_argument('stage',choices=['plan','work','finish']);parser.add_argument('--provider',choices=['mobile','steam'],required=True)
  parser.add_argument('--plan',default='work-plan.json');parser.add_argument('--worker',type=int,default=0)
- parser.add_argument('--seconds',type=int,default=21600);parser.add_argument('--mode',choices=['all','sitemaps','metadata'],default='all')
+ parser.add_argument('--seconds',type=int,default=21600);parser.add_argument('--mode',choices=['all','sitemaps','metadata','release_dates'],default='all')
  parser.add_argument('--metadata-batches',type=int,default=20);parser.add_argument('--owners-seconds',type=int,default=300);parser.add_argument('--engine-seconds',type=int,default=60)
  args=parser.parse_args()
  if not 60<=args.seconds<=21600 or not 0<=args.worker<10 or not 0<=args.metadata_batches<=200 or not 0<=args.owners_seconds<=600 or not 0<=args.engine_seconds<=120:raise ValueError('Invalid worker bounds')
