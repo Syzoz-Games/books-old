@@ -204,7 +204,7 @@ def store_free_status(appid,deadline=None):
   error.close();return None
  except (OSError,ValueError):return None
  return None
-def fetch_engines(records, deadline):
+def fetch_engines(records, deadline, allow_fallbacks=True):
     games = {r['appid']: r for r in records if r.get('type') == 'game'}
     ids = list(games)
     for start in range(0, len(ids), 80):
@@ -231,6 +231,8 @@ def fetch_engines(records, deadline):
         except (OSError, ValueError, TypeError, KeyError):
             break
 
+    if not allow_fallbacks:
+        return
     missing = [r for r in games.values() if not r.get('architectures')]
     for start in range(0, len(missing), 20):
         remaining = deadline - time.monotonic()
