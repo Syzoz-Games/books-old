@@ -23,7 +23,7 @@ concurrency:
 jobs:
   mobile:
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ inputs.mode == 'metadata' && 360 || 35 }}
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
