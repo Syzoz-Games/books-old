@@ -1,0 +1,121 @@
+name: Test bounded Steam JSON batch
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Maximum query candidates, 1 to 10000; default 1000
+        type: number
+        default: 1000
+        required: true
+      logical_workers:
+        description: Disjoint logical shards, 1 to 100
+        type: number
+        default: 100
+        required: true
+      runners:
+        description: Physical runners, 1 to 4; controls parallel cost
+        type: number
+        default: 2
+        required: true
+      owners_limit:
+        description: Optional SteamSpy calls per physical runner, 0 to 60
+        type: number
+        default: 0
+        required: true
+      upload_isolated:
+        description: Upload only to the separately enabled isolated test run
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: steam-bounded-json-benchmark
+  cancel-in-progress: false
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Make the immutable bounded manifest
+        id: plan
+        env:
+          LIMIT: ${{ inputs.limit }}
+          LOGICAL: ${{ inputs.logical_workers }}
+          RUNNERS: ${{ inputs.runners }}
+        run: python batch.py plan --limit "$LIMIT" --logical-workers "$LOGICAL" --runners "$RUNNERS" --seconds 240 --output manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: steam-batch-manifest-${{ github.run_id }}
+          path: manifest.json
+          retention-days: 3
+  work:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 17
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: steam-batch-manifest-${{ github.run_id }}
+      - name: Process assigned disjoint shards only
+        env:
+          RUNNER_INDEX: ${{ matrix.runner }}
+          OWNERS_LIMIT: ${{ inputs.owners_limit }}
+        run: python batch.py work --manifest manifest.json --runner "$RUNNER_INDEX" --seconds 900 --owners-limit "$OWNERS_LIMIT" --output batch-results
+      - name: Preserve shard evidence even after failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: steam-batch-runner-${{ github.run_id }}-${{ matrix.runner }}
+          path: batch-results/
+          if-no-files-found: error
+          retention-days: 3
+  finalize:
+    needs: [plan, work]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: steam-batch-manifest-${{ github.run_id }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: steam-batch-runner-${{ github.run_id }}-*
+          path: batch-results
+          merge-multiple: true
+      - name: Validate all shards and finalize the isolated run
+        env:
+          UPLOAD_ISOLATED: ${{ inputs.upload_isolated }}
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
+          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+        run: |
+          if [ "$UPLOAD_ISOLATED" = "true" ]; then
+            python batch.py finalize --manifest manifest.json --directory batch-results --upload
+          else
+            python batch.py finalize --manifest manifest.json --directory batch-results
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: steam-batch-final-${{ github.run_id }}
+          path: batch-final-result.json
+          if-no-files-found: warn
+          retention-days: 3
