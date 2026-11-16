@@ -142,10 +142,13 @@ def build_sample(worker,sources,appids,github):
   appid=record['appid'];wait=max(0,next_request-time.monotonic())
   if wait:sources.budget.timeout(wait+1);time.sleep(wait)
   sources.budget.timeout(8);next_request=time.monotonic()+1;checked_at=int(time.time());owner_url='https://steamspy.com/api.php?'+urllib.parse.urlencode({'request':'appdetails','appid':appid})
-  try:
-   owner_data=sources.json(owner_url,'steamspy');checked_at=int(time.time());record.update(worker.owner_estimates(worker.owner_fields(appid,owner_data,checked_at)));owners.append({'appid':appid,'url':owner_url,'status':'verified'})
-  except (SampleError,ValueError,TypeError):owners.append({'appid':appid,'url':owner_url,'status':'unavailable','reason':'No verified ownership estimate; no samples invented'})
-  record['architectures']=None;byid[appid]['checked_at']=checked_at
+  if record.get('coming_soon'):
+   owners.append({'appid':appid,'status':'upcoming'})
+  else:
+   try:
+    owner_data=sources.json(owner_url,'steamspy');checked_at=int(time.time());record.update(worker.owner_estimates(worker.owner_fields(appid,owner_data,checked_at)));owners.append({'appid':appid,'url':owner_url,'status':'verified'})
+   except (SampleError,ValueError,TypeError):owners.append({'appid':appid,'url':owner_url,'status':'unavailable','reason':'No verified ownership estimate; no samples invented'})
+  byid[appid]['checked_at']=checked_at
   points=[{'observed_at':checked_at,'total_installs':record['installs'],'period':1}] if record.get('installs') is not None else []
   histories.append({'package':'steam:'+str(appid),'revision':checked_at,'points':points})
   item=returned[appid];summary=(item.get('reviews') or {}).get('summary_filtered',{}) if isinstance(item.get('reviews'),dict) else {}
@@ -238,7 +241,7 @@ def main(argv=None):
         try:
             payload, diagnostics = build_sample(worker, sources, args.appids, github)
             worker.fetch_engines(payload['records'], sources.budget.deadline)
-            diagnostics['engine_diagnostics'] = [{'appid': r['appid'], 'lookup_sources': ['wikidata','pcgamingwiki'], 'engines': r.get('architectures')} for r in payload['records']]
+            diagnostics['engine_diagnostics'] = [{'appid': r['appid'], 'lookup_sources': ['wikidata','pcgamingwiki','steam_community_announcements'], 'engines': r.get('architectures')} for r in payload['records']]
             result.update(diagnostics)
             payload_bytes(payload)
             write_public_json(args.output, payload)
