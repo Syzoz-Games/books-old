@@ -307,6 +307,8 @@ def store_dates(records,deadline=None,tag_names=None,include_details=False):
     r=byid.get(listing_id)
     if not r or a.get('success')!=1:continue
     del byid[listing_id]
+    platforms=a.get('platforms')
+    if isinstance(platforms,dict):r['windows']=platforms.get('windows') is True
     is_free=a.get('is_free')
     if 'is_free' not in a:
      is_free=store_free_status(r['appid'],deadline)
@@ -427,6 +429,57 @@ def owner_phase(tr,state,deadline,engine_seconds=0):
   if stopped or deferred or (not records and not failed and not engines):break
  return totals
 
+def store_catalog_page(start, deadline, count=100):
+ if type(start) is not int or start<0 or type(count) is not int or not 1<=count<=100:raise ValueError('Invalid Store catalog page')
+ payload={'query_name':'syzoz_public_catalog','query':{'start':start,'count':count,'sort':0,'filters':{'type_filters':{'include_games':True}}},'context':{'language':'english','country_code':'US'},'data_request':{'include_basic_info':True}}
+ remaining=deadline-time.monotonic()
+ if remaining<=2:raise RuntimeError('Store catalog deadline reached')
+ url='https://api.steampowered.com/IStoreQueryService/Query/v1/?'+urllib.parse.urlencode({'input_json':json.dumps(payload)})
+ with urllib.request.urlopen(url,timeout=min(25,remaining-1)) as response:doc=json.load(response)
+ response=doc.get('response') if isinstance(doc,dict) else None
+ items=response.get('store_items') if isinstance(response,dict) else None
+ metadata=response.get('metadata') if isinstance(response,dict) else None
+ total=metadata.get('total_matching_records') if isinstance(metadata,dict) else None
+ if isinstance(total,str) and total.isascii() and total.isdecimal():total=int(total)
+ if not isinstance(items,list) or len(items)>count or type(total) is not int or total<0:raise RuntimeError('Invalid Store catalog response')
+ if not items and start<total:raise RuntimeError('Store catalog returned an incomplete page')
+ records=[];seen=set()
+ for item in items:
+  appid=item.get('appid',item.get('id')) if isinstance(item,dict) else None
+  if not isinstance(item,dict) or item.get('success')!=1 or item.get('type')!=0 or item.get('item_type')!=0 or type(appid) is not int or not 1<=appid<=MAX_APP_ID or not isinstance(item.get('name'),str) or not item['name'].strip() or appid in seen:raise RuntimeError('Invalid or duplicate Store game identity')
+  seen.add(appid);records.append(normalize(appid,{'common':{'name':item['name'],'type':'game'}}))
+ details=store_dates(records,deadline=deadline,include_details=True)
+ if {r['appid'] for r in records}!={r['appid'] for r in details}:raise RuntimeError('Store catalog details incomplete; page retained for retry')
+ next_start=start+len(items)
+ return records,details,next_start,total,next_start>=total
+
+def scan_store_catalog(tr, state, deadline):
+ if state.get('store_catalog_complete'):
+  state.update(store_catalog_start=0,store_catalog_complete=False)
+ state.setdefault('store_catalog_start',0)
+ while deadline-time.monotonic()>30:
+  previous=json.loads(json.dumps(state));start=state['store_catalog_start'];uploading=False
+  try:
+   records,details,next_start,total,done=store_catalog_page(start,deadline)
+   if records:fetch_engines(records,deadline)
+   ids=[r['appid'] for r in records]
+   state.update(status='running',phase='store_catalog',heartbeat=int(time.time()),store_catalog_start=next_start,store_catalog_total=total,store_catalog_complete=done)
+   state.pop('last_error',None)
+   if records:
+    state.update(batch_from=min(ids),batch_to=max(ids))
+    audit=base64.b64encode(gzip.compress(json.dumps({'unknown':[],'unnamed':[]}).encode())).decode()
+    uploading=True;send_catalog_batch(tr,previous,state,records,details,audit)
+   else:uploading=True;tr.call('checkpoint',state=state)
+   print(json.dumps({'phase':'store_catalog','offset':start,'next_offset':next_start,'total_matching':total,'games':len(records),'complete':done}),flush=True)
+   if done:break
+  except Exception as error:
+   state.clear();state.update(previous)
+   if uploading:raise
+   state['transport_failures']+=1;state.update(last_error='Store catalog page retained for retry: '+type(error).__name__,heartbeat=int(time.time()))
+   tr.call('checkpoint',state=state)
+   print('::warning::Store catalog page retained for retry: '+type(error).__name__,flush=True);time.sleep(3)
+ return state
+
 def main():
  ap=argparse.ArgumentParser();ap.add_argument('--seconds',type=int,default=21600);ap.add_argument('--owners-seconds',type=int,default=300);ap.add_argument('--engine-seconds',type=int,default=60);ap.add_argument('--enrich-only',action='store_true');ap.add_argument('--batch',type=int,default=1000);ap.add_argument('--local');ap.add_argument('--scan-to',type=int,default=MAX_APP_ID);args=ap.parse_args()
  if not 1<=args.batch<=5000 or not 1<=args.scan_to<=MAX_APP_ID or not 1<=args.seconds<=21600 or args.enrich_only and args.local or not 0<=args.owners_seconds<=600 or not 0<=args.engine_seconds<=120:raise ValueError('Invalid scan bounds or ownership budget')
@@ -440,7 +493,13 @@ def main():
    summary=owner_phase(tr,state,min(started+args.seconds,before+budget),args.engine_seconds if args.enrich_only else args.engine_seconds/2);owner_remaining=max(0,owner_budget-(time.monotonic()-before));print(json.dumps(dict(phase='owners',**summary)),flush=True)
   if args.enrich_only:
    state.update(status='checkpointed',phase='Enrichment checkpoint saved',heartbeat=int(time.time()));tr.call('finish',state=state);return
-  catalog_deadline=started+args.seconds-owner_remaining;client=SteamClient()
+  catalog_deadline=started+args.seconds-owner_remaining
+  if not args.local:
+   scan_store_catalog(tr,state,catalog_deadline)
+   if owner_remaining:owner_phase(tr,state,min(started+args.seconds,time.monotonic()+owner_remaining),args.engine_seconds/2)
+   state.update(status='checkpointed',phase='Public Store catalog checkpoint saved',heartbeat=int(time.time()));tr.call('finish',state=state)
+   return
+  client=SteamClient()
   with Timeout(60,RuntimeError('Steam anonymous login timed out')):
    if client.anonymous_login()!=EResult.OK:raise RuntimeError('Anonymous login rejected')
   if not state['change_number']:state['change_number']=client.get_changes_since(0,app_changes=True,package_changes=False).current_change_number
