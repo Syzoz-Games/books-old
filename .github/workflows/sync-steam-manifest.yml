@@ -1,0 +1,181 @@
+name: Publish bounded Steam JSON manifests
+on:
+  workflow_dispatch:
+    inputs:
+      enable_production:
+        description: Explicitly publish through the separately enabled production manifest receiver
+        type: boolean
+        default: false
+      limit:
+        description: Maximum query candidates in this bounded window, 1 to 10000
+        type: number
+        default: 1000
+        required: true
+      logical_workers:
+        description: Disjoint logical shards, 1 to 100
+        type: number
+        default: 100
+        required: true
+      runners:
+        description: Physical runners, 1 to 4
+        type: number
+        default: 2
+        required: true
+      owners_limit:
+        description: Optional owner calls per runner, 0 to 60; upcoming games skipped
+        type: number
+        default: 0
+        required: true
+      include_unreleased:
+        description: Initial query scope only; continuation inherits server checkpoint scope
+        type: boolean
+        default: false
+      engine_seconds:
+        description: Shared engine budget per runner, 0 to 60 seconds
+        type: number
+        default: 20
+        required: true
+      engine_fallbacks:
+        description: Opt in to bounded per-app engine fallbacks
+        type: boolean
+        default: false
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: steam-production-collector
+  cancel-in-progress: false
+jobs:
+  plan:
+    if: inputs.enable_production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      replay_only: ${{ steps.plan.outputs.replay_only }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reuse this run's immutable manifest on retry
+        if: github.run_attempt != '1'
+        id: reuse
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: steam-production-manifest-${{ github.run_id }}
+          path: prior-manifest
+      - name: Read the durable query checkpoint and plan one bounded window
+        id: plan
+        env:
+          LIMIT: ${{ inputs.limit }}
+          LOGICAL: ${{ inputs.logical_workers }}
+          RUNNERS: ${{ inputs.runners }}
+          INCLUDE_UNRELEASED: ${{ inputs.include_unreleased }}
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
+          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+        run: |
+          python - <<'PY'
+          import os,subprocess,sys
+          from pathlib import Path
+          cmd=[sys.executable,'batch.py','plan','--production','--limit',os.environ['LIMIT'],'--logical-workers',os.environ['LOGICAL'],'--runners',os.environ['RUNNERS'],'--seconds','240','--output','manifest.json']
+          if os.environ['INCLUDE_UNRELEASED']=='true':cmd+=['--include-unreleased']
+          if Path('prior-manifest/manifest.json').exists():cmd+=['--reuse-manifest','prior-manifest/manifest.json']
+          subprocess.run(cmd,check=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: steps.reuse.outcome != 'success'
+        with:
+          name: steam-production-manifest-${{ github.run_id }}
+          path: manifest.json
+          retention-days: 7
+  work:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 17
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: steam-production-manifest-${{ github.run_id }}
+      - name: Load this runner's immutable results on retry
+        id: reuse
+        if: github.run_attempt != '1'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: steam-production-runner-${{ github.run_id }}-${{ matrix.runner }}
+          path: prior-results
+      - name: Collect or replay exact assigned shards
+        env:
+          RUNNER_INDEX: ${{ matrix.runner }}
+          OWNERS_LIMIT: ${{ inputs.owners_limit }}
+          ENGINE_SECONDS: ${{ inputs.engine_seconds }}
+          ENGINE_FALLBACKS: ${{ inputs.engine_fallbacks }}
+          REPLAY_ONLY: ${{ needs.plan.outputs.replay_only }}
+        run: |
+          python - <<'PY'
+          import os,subprocess,sys
+          import batch
+          runner=os.environ['RUNNER_INDEX']
+          mode=batch.runner_mode('prior-results',int(runner),os.environ['REPLAY_ONLY']=='true')
+          if mode=='replay':
+              cmd=[sys.executable,'batch.py','replay','--manifest','manifest.json','--runner',runner,'--directory','prior-results','--output','batch-results']
+          else:
+              cmd=[sys.executable,'batch.py','work','--manifest','manifest.json','--runner',runner,'--seconds','900','--owners-limit',os.environ['OWNERS_LIMIT'],'--engine-seconds',os.environ['ENGINE_SECONDS'],'--output','batch-results']
+              if os.environ['ENGINE_FALLBACKS']=='true':cmd+=['--engine-fallbacks']
+          subprocess.run(cmd,check=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: success() && steps.reuse.outcome != 'success'
+        with:
+          name: steam-production-runner-${{ github.run_id }}-${{ matrix.runner }}
+          path: batch-results/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve failed collection diagnostics outside immutable result names
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: steam-production-partial-${{ github.run_id }}-${{ matrix.runner }}-${{ github.run_attempt }}
+          path: batch-results/
+          if-no-files-found: warn
+          retention-days: 3
+  finalize:
+    needs: [plan, work]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: steam-production-manifest-${{ github.run_id }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: steam-production-runner-${{ github.run_id }}-*
+          path: batch-results
+          merge-multiple: true
+      - name: Publish shared fields and advance only the completed query checkpoint
+        env:
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
+          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+        run: python batch.py finalize --manifest manifest.json --directory batch-results --upload --production
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: steam-production-final-${{ github.run_id }}-${{ github.run_attempt }}
+          path: batch-final-result.json
+          if-no-files-found: warn
+          retention-days: 7
