@@ -229,7 +229,34 @@ def fetch_engines(records, deadline):
                     if name not in labels and len(labels) < 20:
                         games[appid]['architectures'] = labels + [name]
         except (OSError, ValueError, TypeError, KeyError):
-            return
+            break
+
+    missing = [r for r in games.values() if not r.get('architectures')]
+    for start in range(0, len(missing), 20):
+        remaining = deadline - time.monotonic()
+        if remaining < 1:
+            break
+        batch = missing[start:start + 20]
+        indexed = {str(r['appid']): r for r in batch}
+        titles = sorted({title for r in batch for title in (r['name'], r['name'].title()) if '|' not in title})
+        params = {'action':'query', 'format':'json', 'prop':'revisions', 'rvprop':'content',
+                  'rvslots':'main', 'redirects':1, 'titles':'|'.join(titles)}
+        req = urllib.request.Request('https://www.pcgamingwiki.com/w/api.php?' + urllib.parse.urlencode(params),
+                                     headers={'User-Agent':'SyzozPlay/1.0 (https://syzoz.com/game-explorer/)'})
+        try:
+            with urllib.request.urlopen(req, timeout=min(8, remaining)) as response:
+                pages = json.load(response)['query']['pages']
+            for page in pages.values():
+                for rev in page.get('revisions', []):
+                    content = rev['slots']['main']['*']
+                    identity = re.search(r'(?im)^\|steam appid\s*=\s*(\d+)[ \t]*$', content)
+                    if identity and identity[1] in indexed:
+                        names = re.findall(r'(?i)\{\{Infobox game/row/engine\|([^|{}\n]{1,80})(?:\||\}\})', content)
+                        labels = list(dict.fromkeys(n.strip() for n in names if n.strip().isprintable() and n.strip()))
+                        if labels:
+                            indexed[identity[1]]['architectures'] = labels[:20]
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
 
 def store_dates(records,deadline=None,tag_names=None,include_details=False):
  # Commerce applies to every named game, including records already dated by PICS.
