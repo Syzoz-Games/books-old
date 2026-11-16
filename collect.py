@@ -258,6 +258,29 @@ def fetch_engines(records, deadline):
         except (OSError, ValueError, TypeError, KeyError):
             continue
 
+    for row in games.values():
+        if row.get('architectures') or not row.get('coming_soon'):
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining < 1:
+            break
+        params = {'appid': row['appid'], 'count': 30, 'feeds': 'steam_community_announcements'}
+        url = 'https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?' + urllib.parse.urlencode(params)
+        try:
+            with urllib.request.urlopen(url, timeout=min(6, remaining)) as response:
+                news = json.load(response)['appnews']
+            if news.get('appid') != row['appid']:
+                continue
+            for article in news.get('newsitems', []):
+                if article.get('feedname') != 'steam_community_announcements' or article.get('appid') != row['appid']:
+                    continue
+                declaration = re.search(r"(?i)we(?:['’]re| are) developing (?:this|the game) (?:in|using) (Unity|Unreal Engine(?: [45])?|Godot)\b", article.get('contents',''))
+                if declaration:
+                    row['architectures'] = [declaration[1]]
+                    break
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+
 def store_dates(records,deadline=None,tag_names=None,include_details=False):
  # Commerce applies to every named game, including records already dated by PICS.
  # Missing StoreBrowse flags use a bounded explicit Store-listing fallback.
