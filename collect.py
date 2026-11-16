@@ -76,10 +76,32 @@ def normalize(appid,data):
  c=data.get('common') or {};name=c.get('name');kind=str(c.get('type','unknown')).lower()
  if not name:return None
  associations=c.get('associations') or {};developers=[x.get('name','') for x in associations.values() if isinstance(x,dict) and x.get('type')=='developer'] if isinstance(associations,dict) else []
- return {'appid':int(appid),'name':str(name)[:500],'type':kind,'release_ts':timestamp(c.get('steam_release_date')),'original_release_ts':None,'coming_soon':c.get('releasestate')=='prerelease','windows':'windows' in str(c.get('oslist','')).lower(),'developer':', '.join(developers)[:500],'icon':'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/'+str(appid)+'/header.jpg','restricted':bool(data.get('_missing_token',False)),'is_free':None,'installs':None,'installs_max':None,'installs_estimated':None,'installs_source':None,'installs_checked_at':None,'rating':None,'rating_count':None,'rating_source':None,'rating_checked_at':None,'category':None,'tags':None,'version':None,'description':None,'price':None,'ads_supported':None,'iap':None,'architectures':None,**public_update(data),**public_size(data)}
+ icon=''
+ for field,ext,lengths in [('clienticon','ico',(32,40)),('icon','jpg',(40,))]:
+  image_hash=c.get(field)
+  if isinstance(image_hash,str) and len(image_hash) in lengths and all(x in '0123456789abcdef' for x in image_hash.lower()):
+   icon='https://cdn.akamai.steamstatic.com/steamcommunity/public/images/apps/'+str(appid)+'/'+image_hash.lower()+'.'+ext;break
+ return {'appid':int(appid),'name':str(name)[:500],'type':kind,'release_ts':timestamp(c.get('steam_release_date')),'original_release_ts':None,'coming_soon':c.get('releasestate')=='prerelease','windows':'windows' in str(c.get('oslist','')).lower(),'developer':', '.join(developers)[:500],'icon':icon,'restricted':bool(data.get('_missing_token',False)),'is_free':None,'installs':None,'installs_max':None,'installs_estimated':None,'installs_source':None,'installs_checked_at':None,'rating':None,'rating_count':None,'rating_source':None,'rating_checked_at':None,'category':None,'tags':None,'version':None,'description':None,'price':None,'ads_supported':None,'iap':None,'architectures':None,**public_update(data),**public_size(data)}
+def store_free_status(appid,deadline=None):
+ # Optional protobuf-field absence alone does not prove a paid game. Only an
+ # explicit boolean from this matching successful public listing may fill it.
+ remaining=8 if deadline is None else deadline-time.monotonic()
+ if remaining<=1:return None
+ timeout=min(8,remaining);url='https://store.steampowered.com/api/appdetails?'+urllib.parse.urlencode({'appids':appid,'cc':'us','l':'english'})
+ try:
+  with Timeout(timeout,OSError('Store free-status request timed out')):
+   with urllib.request.urlopen(url,timeout=timeout) as response:raw=response.read(1000001)
+  if len(raw)>1000000:return None
+  reply=json.loads(raw);item=reply.get(str(appid)) if isinstance(reply,dict) else None
+  data=item.get('data') if isinstance(item,dict) and item.get('success') is True else None
+  if isinstance(data,dict) and type(data.get('steam_appid')) is int and data['steam_appid']==appid and data.get('type')=='game' and type(data.get('is_free')) is bool:return data['is_free']
+ except urllib.error.HTTPError as error:
+  error.close();return None
+ except (OSError,ValueError):return None
+ return None
 def store_dates(records,deadline=None):
  # Commerce applies to every named game, including records already dated by PICS.
- # Only an explicit StoreBrowse boolean classifies free/paid; missing is unknown.
+ # Missing StoreBrowse flags use a bounded explicit Store-listing fallback.
  games=[r for r in records if r['type']=='game']
  for start in range(0,len(games),100):
   rows=games[start:start+100];payload={'ids':[{'appid':r['appid']} for r in rows],'context':{'language':'english','country_code':'US'},'data_request':{'include_release':True,'include_basic_info':True,'include_assets':True}}
@@ -96,21 +118,25 @@ def store_dates(records,deadline=None):
    for a in d.get('response',{}).get('store_items',[]):
     r=byid.get(a.get('appid',a.get('id')))
     if not r or a.get('success')!=1:continue
-    if type(a.get('is_free')) is bool:r['is_free']=a['is_free']
+    is_free=a.get('is_free')
+    if 'is_free' not in a:
+     is_free=store_free_status(r['appid'],deadline)
+     if is_free is None:r['store_retry']=True
+    if type(is_free) is bool:r['is_free']=is_free
     basic=a.get('basic_info');basic=basic if isinstance(basic,dict) else {};description=basic.get('short_description')
     if isinstance(description,str) and 0<len(description.strip())<=50000 and '\x00' not in description and not any(0xD800<=ord(c)<=0xDFFF for c in description):r['description']=description.strip()
     categories=a.get('categories');features=categories.get('feature_categoryids') if isinstance(categories,dict) else None
     if isinstance(features,list) and all(type(i) is int and 0<=i<=MAX_APP_ID for i in features):r['iap']=35 in features
     # A free game's optional upgrade/edition is not the base-game price.
     purchase=a.get('best_purchase_option');price=purchase.get('formatted_final_price') if isinstance(purchase,dict) else None
-    if a.get('is_free') is True:r['price']='0'
+    if is_free is True:r['price']='0'
     elif isinstance(price,str) and 0<len(price.strip())<=200 and not any(ord(c)<32 or 0xD800<=ord(c)<=0xDFFF for c in price):r['price']=price.strip()
     rel=a.get('release') or {};released=timestamp(rel.get('steam_release_date'));original=timestamp(rel.get('original_release_date'))
     if not r['release_ts'] and released:r['release_ts']=released
     if original:r['original_release_ts']=original
     if type(rel.get('is_coming_soon')) is bool:r['coming_soon']=rel['is_coming_soon']
-    assets=a.get('assets',{});fmt=assets.get('asset_url_format','');asset=assets.get('header')
-    if fmt.startswith('steam/apps/') and asset:r['icon']='https://shared.fastly.steamstatic.com/store_item_assets/'+fmt.replace('${FILENAME}',asset)
+    assets=a.get('assets');assets=assets if isinstance(assets,dict) else {};image_hash=assets.get('community_icon')
+    if not str(r.get('icon') or '').endswith('.ico') and isinstance(image_hash,str) and len(image_hash)==40 and all(x in '0123456789abcdef' for x in image_hash.lower()):r['icon']='https://cdn.akamai.steamstatic.com/steamcommunity/public/images/apps/'+str(r['appid'])+'/'+image_hash.lower()+'.jpg'
     developer_rows=basic.get('developers');developers=', '.join(x['name'] for x in developer_rows if isinstance(x,dict) and isinstance(x.get('name'),str))[:500] if isinstance(developer_rows,list) else ''
     if developers:r['developer']=developers
   except (OSError,ValueError):
