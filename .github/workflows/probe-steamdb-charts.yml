@@ -30,35 +30,68 @@ jobs:
           USE_BROWSER: ${{ inputs.browser }}
         run: |
           python3 - <<'PYTHON'
-          import json,re,time,urllib.request,urllib.error,os
-          url='https://steamdb.info/app/730/charts/'
-          started=time.monotonic()
+          import html,json,re,time,urllib.request,urllib.error,os
+          URL='https://steamdb.info/app/730/charts/'
+          APIS=['https://steamdb.info/api/GetGraphWeek/?appid=730','https://steamdb.info/api/GetGraphMax/?appid=730']
           browser=os.environ.get('USE_BROWSER')=='true'
-          if browser:
-              command={'cmd':'request.get','url':url,'maxTimeout':60000}
-              request=urllib.request.Request('http://127.0.0.1:8191/v1',json.dumps(command).encode(),{'Content-Type':'application/json'})
-              with urllib.request.urlopen(request,timeout=75) as response:reply=json.load(response)
-              solution=reply.get('solution') or {}
-              status=solution.get('status');body=solution.get('response') or ''
-          else:
-              request=urllib.request.Request(url,headers={'User-Agent':'SyzozSteamSample/1.0'})
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,*args,**kwargs):return None
+          http=urllib.request.build_opener(NoRedirect)
+          def command(payload):
+              req=urllib.request.Request('http://127.0.0.1:8191/v1',json.dumps(payload).encode(),{'Content-Type':'application/json'})
               try:
-                  response=urllib.request.urlopen(request,timeout=20)
-                  status=response.status;body=response.read(2000000).decode('utf-8','replace')
-              except urllib.error.HTTPError as error:
-                  status=error.code;body=error.read(2000000).decode('utf-8','replace')
-          title=re.search(r'<title>(.*?)</title>',body,re.S)
-          result={'url':url,'http_status':status,'bytes':len(body.encode()),'seconds':round(time.monotonic()-started,2),'title':title.group(1) if title else None,'chart_page_verified':status==200 and 'Owner estimations' in body and 'Steam charts' in body,'browser_service':browser,'captcha_interaction':'possible' if browser else False,'production_modified':False}
-          print(json.dumps(result),flush=True)
-          with open('steamdb-charts-result.json','w') as f:json.dump(result,f,indent=2)
-          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write('## One-page SteamDB access test\n```json\n'+json.dumps(result,indent=2)+'\n```\n')
-          if not result['chart_page_verified']:raise SystemExit(1)
+                  with http.open(req,timeout=75) as r:return json.load(r)
+              except urllib.error.HTTPError as e:
+                  try:return json.load(e)
+                  except Exception:return {'status':'error'}
+          def read(url,session=None):
+              started=time.monotonic()
+              if browser:
+                  reply=command({'cmd':'request.get','url':url,'session':session,'maxTimeout':60000 if url==URL else 30000})
+                  solution=reply.get('solution') or {}
+                  return solution.get('status'),solution.get('response') or '',round(time.monotonic()-started,2)
+              request=urllib.request.Request(url,headers={'User-Agent':'SyzozSteamSample/1.0','Accept':'application/json,text/html','Referer':URL,'X-Requested-With':'XMLHttpRequest'})
+              try:
+                  with http.open(request,timeout=15) as r:return r.status,r.read(2000000).decode('utf-8','replace'),round(time.monotonic()-started,2)
+              except urllib.error.HTTPError as e:return e.code,e.read(2000000).decode('utf-8','replace'),round(time.monotonic()-started,2)
+          session=None
+          result={'page':{},'json_endpoints':[],'browser_service':browser,'production_modified':False}
+          try:
+              if browser:
+                  session=command({'cmd':'sessions.create'}).get('session')
+                  if not session:raise RuntimeError('Browser session unavailable')
+              status,body,seconds=read(URL,session)
+              title=re.search(r'<title>(.*?)</title>',body,re.S)
+              result['page']={'url':URL,'http_status':status,'bytes':len(body.encode()),'seconds':seconds,'title':title.group(1) if title else None,'verified':status==200 and 'Owner estimations' in body and 'Steam charts' in body}
+              for i,url in enumerate(APIS):
+                  status,body,seconds=read(url,session)
+                  decoded=None
+                  candidates=[body]
+                  pre=re.search(r'<pre(?:\s[^>]*)?>(.*?)</pre>',body,re.S)
+                  if pre:candidates.append(html.unescape(pre.group(1)))
+                  for candidate in candidates:
+                      try:decoded=json.loads(candidate);break
+                      except ValueError:pass
+                  valid=status==200 and isinstance(decoded,(dict,list)) and (not isinstance(decoded,dict) or decoded.get('success') is not False)
+                  entry={'url':url,'http_status':status,'bytes':len(body.encode()),'seconds':seconds,'json_decoded':isinstance(decoded,(dict,list)),'usable_json':valid}
+                  if isinstance(decoded,dict):entry['top_keys']=list(decoded)[:12]
+                  if valid:
+                      with open('steamdb-charts-data-'+str(i)+'.json','w') as f:json.dump(decoded,f)
+                  result['json_endpoints'].append(entry)
+          finally:
+              if session:
+                  try:command({'cmd':'sessions.destroy','session':session})
+                  except Exception:pass
+              print(json.dumps(result),flush=True)
+              with open('steamdb-charts-result.json','w') as f:json.dump(result,f,indent=2)
+              with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write('## One-app SteamDB HTML and JSON access test\n```json\n'+json.dumps(result,indent=2)+'\n```\n')
+          if not any(r.get('usable_json') for r in result['json_endpoints']):raise SystemExit(1)
           PYTHON
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: steamdb-charts-one-page-result
-          path: steamdb-charts-result.json
+          path: steamdb-charts*.json
           retention-days: 3
       - name: Stop browser service
         if: always() && inputs.browser
