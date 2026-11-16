@@ -1,5 +1,5 @@
 """Anonymous Steam collector. Website owns durable checkpoints; no empty-gap stop."""
-import argparse,base64,gzip,json,os,re,time,urllib.request,urllib.error,urllib.parse
+import argparse,base64,gzip,json,os,re,time,unicodedata,urllib.request,urllib.error,urllib.parse
 from pathlib import Path
 from contextlib import nullcontext
 from datetime import datetime,timezone
@@ -44,11 +44,39 @@ def public_update(data):
  except ValueError:return result
  if not 1063324800<=seconds<=int(time.time())+300:return result
  return {'updated_date':datetime.fromtimestamp(seconds,timezone.utc).isoformat().replace('+00:00','Z'),'updated_source':'steam_public_build' if key=='timebuildupdated' else 'steam_public_branch'}
+def public_size(data):
+ # One shared download-byte field: public Windows64/English, no optional DLC
+ # or shared-app redistributables. Installed bytes/cloud quota are not sizes.
+ unknown={'size':None};depots=data.get('depots')
+ if not isinstance(depots,dict):return unknown
+ total=0;found=False
+ for depotid,depot in depots.items():
+  if not (isinstance(depotid,str) and depotid.isascii() and depotid.isdecimal()):continue
+  if not isinstance(depot,dict):return unknown
+  config=depot.get('config') or {}
+  if not isinstance(config,dict):return unknown
+  if any(value not in (None,'',0,'0',False) for value in (depot.get('dlcappid'),config.get('optionaldlc'),depot.get('sharedinstall'),depot.get('depotfromapp'))):continue
+  oslist=config.get('oslist') or '';language=config.get('language') or '';arch=config.get('osarch') or ''
+  if not isinstance(oslist,str) or not isinstance(language,str) or type(arch) not in (str,int):return unknown
+  if oslist.strip() and 'windows' not in oslist.lower().replace(',',' ').split():continue
+  if language.strip().lower() not in ('','english') or str(arch).strip() not in ('','64'):continue
+  manifests=depot.get('manifests') or {}
+  if not isinstance(manifests,dict):return unknown
+  if 'public' not in manifests:continue
+  manifest=manifests['public']
+  if not isinstance(manifest,dict):return unknown
+  value=manifest.get('download')
+  if type(value) is not int and not (isinstance(value,str) and value.isascii() and value.isdecimal()):return unknown
+  try:size=int(value)
+  except ValueError:return unknown
+  if not 0<=size<=9007199254740991 or total+size>9007199254740991:return unknown
+  total+=size;found=True
+ return {'size':total if found else None}
 def normalize(appid,data):
  c=data.get('common') or {};name=c.get('name');kind=str(c.get('type','unknown')).lower()
  if not name:return None
  associations=c.get('associations') or {};developers=[x.get('name','') for x in associations.values() if isinstance(x,dict) and x.get('type')=='developer'] if isinstance(associations,dict) else []
- return {'appid':int(appid),'name':str(name)[:500],'type':kind,'release_ts':timestamp(c.get('steam_release_date')),'original_release_ts':None,'coming_soon':c.get('releasestate')=='prerelease','windows':'windows' in str(c.get('oslist','')).lower(),'developer':', '.join(developers)[:500],'icon':'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/'+str(appid)+'/header.jpg','restricted':bool(data.get('_missing_token',False)),'is_free':None,'installs':None,'installs_max':None,'installs_estimated':None,'installs_source':None,'installs_checked_at':None,'rating':None,'rating_count':None,'rating_source':None,'rating_checked_at':None,**public_update(data)}
+ return {'appid':int(appid),'name':str(name)[:500],'type':kind,'release_ts':timestamp(c.get('steam_release_date')),'original_release_ts':None,'coming_soon':c.get('releasestate')=='prerelease','windows':'windows' in str(c.get('oslist','')).lower(),'developer':', '.join(developers)[:500],'icon':'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/'+str(appid)+'/header.jpg','restricted':bool(data.get('_missing_token',False)),'is_free':None,'installs':None,'installs_max':None,'installs_estimated':None,'installs_source':None,'installs_checked_at':None,'rating':None,'rating_count':None,'rating_source':None,'rating_checked_at':None,'category':None,'tags':None,'version':None,'description':None,'price':None,'ads_supported':None,'iap':None,'architectures':None,**public_update(data),**public_size(data)}
 def store_dates(records,deadline=None):
  # Commerce applies to every named game, including records already dated by PICS.
  # Only an explicit StoreBrowse boolean classifies free/paid; missing is unknown.
@@ -69,13 +97,21 @@ def store_dates(records,deadline=None):
     r=byid.get(a.get('appid',a.get('id')))
     if not r or a.get('success')!=1:continue
     if type(a.get('is_free')) is bool:r['is_free']=a['is_free']
+    basic=a.get('basic_info');basic=basic if isinstance(basic,dict) else {};description=basic.get('short_description')
+    if isinstance(description,str) and 0<len(description.strip())<=50000 and '\x00' not in description and not any(0xD800<=ord(c)<=0xDFFF for c in description):r['description']=description.strip()
+    categories=a.get('categories');features=categories.get('feature_categoryids') if isinstance(categories,dict) else None
+    if isinstance(features,list) and all(type(i) is int and 0<=i<=MAX_APP_ID for i in features):r['iap']=35 in features
+    # A free game's optional upgrade/edition is not the base-game price.
+    purchase=a.get('best_purchase_option');price=purchase.get('formatted_final_price') if isinstance(purchase,dict) else None
+    if a.get('is_free') is True:r['price']='0'
+    elif isinstance(price,str) and 0<len(price.strip())<=200 and not any(ord(c)<32 or 0xD800<=ord(c)<=0xDFFF for c in price):r['price']=price.strip()
     rel=a.get('release') or {};released=timestamp(rel.get('steam_release_date'));original=timestamp(rel.get('original_release_date'))
     if not r['release_ts'] and released:r['release_ts']=released
     if original:r['original_release_ts']=original
     if type(rel.get('is_coming_soon')) is bool:r['coming_soon']=rel['is_coming_soon']
     assets=a.get('assets',{});fmt=assets.get('asset_url_format','');asset=assets.get('header')
     if fmt.startswith('steam/apps/') and asset:r['icon']='https://shared.fastly.steamstatic.com/store_item_assets/'+fmt.replace('${FILENAME}',asset)
-    developers=', '.join(x.get('name','') for x in (a.get('basic_info') or {}).get('developers',[]) if isinstance(x,dict))[:500]
+    developer_rows=basic.get('developers');developers=', '.join(x['name'] for x in developer_rows if isinstance(x,dict) and isinstance(x.get('name'),str))[:500] if isinstance(developer_rows,list) else ''
     if developers:r['developer']=developers
   except (OSError,ValueError):
    for r in rows:r['store_retry']=True
@@ -96,6 +132,18 @@ def owner_fields(appid,data,checked_at):
  # A missing/malformed review response must not discard a valid owner estimate.
  if type(positive) is int and type(negative) is int and 0<=positive<=9007199254740991 and 0<=negative<=9007199254740991 and 0<positive+negative<=9007199254740991:
   record.update(rating=5*positive/(positive+negative),rating_count=positive+negative,rating_source='steamspy_reviews',rating_checked_at=checked_at)
+ tags=data.get('tags');ranked=[]
+ if isinstance(tags,dict) and tags:
+  for name,votes in tags.items():
+   if not isinstance(name,str) or not 1<=len(name.strip())<=80 or any(unicodedata.category(c).startswith('C') for c in name) or type(votes) is not int or not 0<=votes<=9007199254740991:
+    ranked=[];break
+   ranked.append((name.strip(),votes))
+ if ranked:
+  ranked.sort(key=lambda item:(-item[1],item[0].casefold(),item[0]));names=[];seen=set()
+  for name,votes in ranked:
+   if name.casefold() not in seen:names.append(name);seen.add(name.casefold())
+   if len(names)==20:break
+  record.update(category=names[0],tags=names)
  return record
 def owner_phase(tr,state,deadline):
  # Server selects due saved games; no ever-growing pending-AppID checkpoint.
