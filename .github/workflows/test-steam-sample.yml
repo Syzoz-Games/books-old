@@ -1,0 +1,48 @@
+name: Test Steam sample upload
+on:
+  workflow_dispatch:
+    inputs:
+      appids:
+        description: One or two allowed test AppIDs
+        required: true
+        default: '620 730'
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: steam-bounded-sample-upload
+  cancel-in-progress: false
+jobs:
+  sample:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install existing collector dependencies
+        run: pip install -r requirements.txt
+      - name: Collect and upload the bounded sample
+        env:
+          SAMPLE_APP_IDS: ${{ inputs.appids }}
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
+          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+        run: |
+          python - <<'PY'
+          import os,re,subprocess,sys
+          ids=os.environ['SAMPLE_APP_IDS'].replace(',',' ').split()
+          if not 1<=len(ids)<=2 or len(set(ids))!=len(ids) or any(not re.fullmatch(r'[1-9][0-9]{0,9}',i) for i in ids):
+              raise SystemExit('Exactly one or two unique numeric AppIDs are required')
+          subprocess.run([sys.executable,'sample.py','--appids',*ids,'--seconds','240'],check=True)
+          PY
+      - name: Save sample evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: steam-bounded-sample-${{ github.run_id }}
+          path: |
+            sample-result.json
+            sample-payload.json
+          if-no-files-found: warn
+          retention-days: 3
