@@ -1,8 +1,9 @@
-"""Manual APKPure sync using ordinary HTTP only; no browser or challenge handling."""
+"""Manual APKPure sync: FlareSolverr sitemaps and direct JSON metadata API."""
 import argparse
 import base64
 import gzip
 import hashlib
+import html
 import hmac
 import json
 import os
@@ -126,12 +127,71 @@ def xml_document(raw, root_name):
         raise SyncError('Sitemap is empty or contains an unexpected host', 'apkpure.net')
     return root
 
+class SitemapBrowser:
+    """One local browser session, restricted to APKPure's published game maps."""
+    ENDPOINT = 'http://127.0.0.1:8191/v1'
+
+    def __init__(self, http):
+        self.http, self.session = http, None
+
+    def command(self, payload):
+        raw = self.http.request(self.ENDPOINT, 'flaresolverr', payload, maximum=16_000_000)
+        try:
+            result = json.loads(raw)
+        except ValueError:
+            raise SyncError('FlareSolverr returned invalid JSON', 'flaresolverr') from None
+        if not isinstance(result, dict) or result.get('status') != 'ok':
+            raise SyncError('FlareSolverr could not complete the sitemap request', 'flaresolverr')
+        return result
+
+    def fetch(self, url, root_name):
+        if url != INDEX and not GAME.fullmatch(url):
+            raise SyncError('Browser request is outside the APKPure sitemap allowlist', 'configuration')
+        if not self.session:
+            self.session = self.command({'cmd': 'sessions.create'}).get('session')
+            if not isinstance(self.session, str) or not self.session:
+                raise SyncError('FlareSolverr did not create a session', 'flaresolverr')
+        remaining = self.http.deadline - time.monotonic()
+        if remaining <= 12:
+            raise SyncError('Time budget reached; saved checkpoints are retained', 'apkpure.net')
+        result = self.command({'cmd': 'request.get', 'url': url, 'session': self.session,
+                               'maxTimeout': int(min(35, remaining - 10) * 1000)})
+        solution = result.get('solution') or {}
+        if not isinstance(solution, dict) or solution.get('status') != 200:
+            raise SyncError('Browser sitemap response was not HTTP 200', 'apkpure.net',
+                            solution.get('status') if isinstance(solution, dict) else None)
+        body = solution.get('response')
+        if not isinstance(body, str) or len(body.encode('utf-8')) > 12_000_000:
+            raise SyncError('Browser sitemap response is missing or too large', 'apkpure.net')
+        # Chromium wraps rendered XML in HTML; retain only the strict XML document.
+        pattern = rf'<(?:[\w.-]+:)?{root_name}\b.*?</(?:[\w.-]+:)?{root_name}\s*>'
+        for candidate in (body, html.unescape(body)):
+            match = re.search(pattern, candidate, re.S)
+            if match:
+                return xml_document(match.group().encode('utf-8'), root_name)
+        raise SyncError('Browser did not return sitemap XML', 'apkpure.net')
+
+    def close(self):
+        if not self.session:
+            return
+        # Cleanup has its own short timeout, even when the sync budget has expired.
+        try:
+            request = urllib.request.Request(self.ENDPOINT, compact({'cmd': 'sessions.destroy', 'session': self.session}),
+                                             {'Content-Type': 'application/json'})
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=5) as response:
+                response.read(100_000)
+        except (OSError, ValueError):
+            pass
+        finally:
+            self.session = None
+
 def sync_sitemaps(http, credential, run):
     begun = False
+    browser = SitemapBrowser(http)
     def upload(action, **fields):
         return http.website(MIRROR, {'action': action, 'run_id': run, **fields}, credential)
     try:
-        root = xml_document(http.request(INDEX, 'apkpure.net'), 'sitemapindex')
+        root = browser.fetch(INDEX, 'sitemapindex')
         manifest = {}
         for row in root.findall(f'{{{NS}}}sitemap'):
             url = row.findtext(f'{{{NS}}}loc', '')
@@ -152,7 +212,7 @@ def sync_sitemaps(http, credential, run):
             raise SyncError('Website returned invalid pending sitemap checkpoints', 'website')
         print(json.dumps({'phase': 'sitemaps', 'manifest_files': len(manifest), 'pending_files': len(pending), 'unchanged_files': len(manifest) - len(pending)}), flush=True)
         for number, url in enumerate(pending, 1):
-            root = xml_document(http.request(url, 'apkpure.net'), 'urlset')
+            root = browser.fetch(url, 'urlset')
             ET.register_namespace('', NS)
             body = ET.tostring(root, encoding='utf-8', xml_declaration=True)
             if len(body) > 8_000_000:
@@ -173,6 +233,8 @@ def sync_sitemaps(http, credential, run):
             except SyncError:
                 pass
         raise
+    finally:
+        browser.close()
 
 def metadata_detail(detail, package):
     if detail is None:
