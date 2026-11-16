@@ -146,6 +146,8 @@ def sync_sitemaps(http, credential, run):
         result = upload('begin', manifest=manifest)
         begun = True
         pending = result.get('pending')
+        if pending == []:  # PHP encodes an empty associative array as [].
+            pending = {}
         if not isinstance(pending, dict) or any(url not in manifest or modified != manifest[url] for url, modified in pending.items()):
             raise SyncError('Website returned invalid pending sitemap checkpoints', 'website')
         print(json.dumps({'phase': 'sitemaps', 'manifest_files': len(manifest), 'pending_files': len(pending), 'unchanged_files': len(manifest) - len(pending)}), flush=True)
