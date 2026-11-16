@@ -67,10 +67,28 @@ def mobile_work(m,args,plan):
 
 def mobile_finish(m,args,plan):
  if plan['mode']=='metadata':return {'metadata':'workers finished; any deferred claims remain queued'}
- token=credential('mobile',m);http=m.Http(90)
- state=http.website(m.MIRROR,{'action':'parallel-status','run_id':plan['run_id']},token)
- action='finish' if state.get('pending_files')==0 else 'parallel-checkpoint'
- return http.website(m.MIRROR,{'action':action,'run_id':plan['run_id']},token)
+ token=credential('mobile',m);http=m.Http(900)
+ payload={'run_id':plan['run_id']}
+ def status():return http.website(m.MIRROR,{'action':'parallel-status',**payload},token)
+ state=status()
+ if state.get('complete'):return state
+ if state.get('pending_files')!=0:return http.website(m.MIRROR,{'action':'parallel-checkpoint',**payload},token)
+ try:
+  # One mutation attempt; after a lost response, observe the durable receipt.
+  return http.website(m.MIRROR,{'action':'finish',**payload},token,timeout=300,attempts=1)
+ except m.SyncError as error:
+  if error.status is not None and error.status<500:raise
+  failure=error
+ while http.deadline-time.monotonic()>10:
+  time.sleep(3)
+  try:
+   state=status()
+  except m.SyncError as error:
+   if error.status is not None and error.status<500:raise
+   continue
+  if state.get('complete'):return state
+  if not state.get('finalizing'):raise failure
+ raise failure
 
 def steam_transport(m):return m.Transport(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/game-explorer/steam-sync.php'),credential('steam',m))
 
