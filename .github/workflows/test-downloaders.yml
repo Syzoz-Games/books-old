@@ -1,0 +1,54 @@
+name: Live metadata downloader timing
+on: workflow_dispatch
+permissions:
+  contents: read
+concurrency:
+  group: live-download-timing
+  cancel-in-progress: false
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: python3 download-benchmark.py plan
+      - uses: actions/upload-artifact@v4
+        with:
+          name: groups
+          path: groups.json
+          retention-days: 1
+  download:
+    name: ${{ matrix.provider }} · job ${{ matrix.index }} · ${{ matrix.slots }} downloads
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    strategy:
+      fail-fast: true
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: groups
+      - run: python3 download-benchmark.py download "${{ matrix.provider }}" "${{ matrix.index }}" "${{ matrix.slots }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: timing-${{ matrix.index }}
+          path: result-*.json
+          retention-days: 1
+  summary:
+    if: always() && needs.plan.result == 'success'
+    needs: [plan, download]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: timing-*
+          path: results
+          merge-multiple: true
+      - run: python3 download-benchmark.py summarize
