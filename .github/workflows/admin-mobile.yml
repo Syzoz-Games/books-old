@@ -21,7 +21,10 @@ concurrency:
   group: production-game-catalog
   cancel-in-progress: false
 jobs:
-  mobile:
+  prepare:
+    name: Prepare shared Mobile plan
+    outputs:
+      artifact: mobile-work-plan-${{ github.run_attempt }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -40,13 +43,75 @@ jobs:
           done
           docker logs mobile-solver
           exit 1
+      - name: Prepare pending sitemap assignments
+        env:
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
+          SYNC_MODE: ${{ inputs.mode }}
+          SYNC_SECONDS: ${{ inputs.seconds || '21600' }}
+          METADATA_BATCHES: ${{ inputs.metadata_batches }}
+        run: python parallel_catalog.py plan --provider mobile --mode "$SYNC_MODE" --seconds "$SYNC_SECONDS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mobile-work-plan-${{ github.run_attempt }}
+          path: work-plan.json
+          if-no-files-found: error
+      - name: Remove sitemap browser
+        if: always() && inputs.mode != 'metadata'
+        run: docker rm -f mobile-solver || true
+  mobile:
+    name: Mobile worker ${{ matrix.worker }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        worker: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.artifact }}
+      - name: Start sitemap browser
+        if: inputs.mode != 'metadata'
+        run: |
+          docker pull ghcr.io/flaresolverr/flaresolverr:latest
+          docker run -d --name mobile-solver --shm-size=1g --tmpfs /tmp:exec,mode=1777,size=1G -p 127.0.0.1:8191:8191 -e LOG_LEVEL=INFO ghcr.io/flaresolverr/flaresolverr:latest
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent --max-time 2 --output /dev/null http://127.0.0.1:8191/; then exit 0; fi
+            sleep 1
+          done
+          docker logs mobile-solver
+          exit 1
       - name: Sync mobile catalog with FlareSolverr sitemaps
         env:
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
           SYNC_MODE: ${{ inputs.mode }}
           SYNC_SECONDS: ${{ inputs.seconds || '21600' }}
           METADATA_BATCHES: ${{ inputs.metadata_batches }}
-        run: python apkpure/admin_mobile.py --mode "$SYNC_MODE" --seconds "$SYNC_SECONDS" --metadata-batches "$METADATA_BATCHES"
+        run: python parallel_catalog.py work --provider mobile --worker "${{ matrix.worker }}" --seconds "$SYNC_SECONDS" --metadata-batches "$METADATA_BATCHES"
       - name: Remove sitemap browser
         if: always() && inputs.mode != 'metadata'
         run: docker rm -f mobile-solver || true
+  finalize:
+    name: Save shared Mobile checkpoint
+    needs: [prepare, mobile]
+    if: ${{ always() && !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.artifact }}
+      - name: Finalize saved sitemap progress
+        env:
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
+        run: python parallel_catalog.py finish --provider mobile
