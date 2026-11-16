@@ -379,8 +379,10 @@ def sync_metadata(http, credential, run, batches):
             dated += receipt.get('dated', 0)
             print(json.dumps({'phase': 'metadata', 'batch': processed, 'concurrency': 50, 'claimed': len(packages), 'stored': receipt.get('stored'), 'dated': receipt.get('dated'), 'failed': len(failures), 'requeued': receipt.get('requeued'), 'remaining': receipt.get('remaining')}), flush=True)
             if failures:
-                error = next((e for e in failures.values() if e.status is not None), next(iter(failures.values())))
-                raise error
+                denial = next((e for e in failures.values() if e.status in (403, 429)), None)
+                if denial is not None:
+                    raise denial
+                print(json.dumps({'phase': 'metadata_retry', 'deferred': len(failures), 'reason': 'Temporary per-game failures requeued; continuing'}), flush=True)
         finally:
             if not submitted:
                 try:
