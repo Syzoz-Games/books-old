@@ -81,7 +81,9 @@ def normalize(appid,data):
   image_hash=c.get(field)
   if isinstance(image_hash,str) and len(image_hash) in lengths and all(x in '0123456789abcdef' for x in image_hash.lower()):
    icon='https://cdn.akamai.steamstatic.com/steamcommunity/public/images/apps/'+str(appid)+'/'+image_hash.lower()+'.'+ext;break
- return {'appid':int(appid),'name':str(name)[:500],'type':kind,'release_ts':timestamp(c.get('steam_release_date')),'original_release_ts':None,'coming_soon':c.get('releasestate')=='prerelease','windows':'windows' in str(c.get('oslist','')).lower(),'developer':', '.join(developers)[:500],'icon':icon,'restricted':bool(data.get('_missing_token',False)),'is_free':None,'installs':None,'installs_max':None,'installs_estimated':None,'installs_source':None,'installs_checked_at':None,'rating':None,'rating_count':None,'rating_source':None,'rating_checked_at':None,'category':None,'tags':None,'version':None,'description':None,'price':None,'ads_supported':None,'iap':None,'architectures':None,**public_update(data),**public_size(data)}
+ version=None;depots=data.get('depots');branches=depots.get('branches') if isinstance(depots,dict) else None;public=branches.get('public') if isinstance(branches,dict) else None;build=public.get('buildid') if isinstance(public,dict) else None
+ if (type(build) is int or isinstance(build,str) and 1<=len(build)<=16 and build.isascii() and build.isdecimal()) and 0<int(build)<=9007199254740991:version='Build '+str(int(build))
+ return {'appid':int(appid),'name':str(name)[:500],'type':kind,'release_ts':timestamp(c.get('steam_release_date')),'original_release_ts':None,'coming_soon':c.get('releasestate')=='prerelease','windows':'windows' in str(c.get('oslist','')).lower(),'developer':', '.join(developers)[:500],'icon':icon,'restricted':bool(data.get('_missing_token',False)),'is_free':None,'installs':None,'installs_max':None,'installs_estimated':None,'installs_source':None,'installs_checked_at':None,'rating':None,'rating_count':None,'rating_source':None,'rating_checked_at':None,'category':None,'tags':None,'version':version,'description':None,'price':None,'ads_supported':None,'iap':None,'architectures':None,**public_update(data),**public_size(data)}
 def store_free_status(appid,deadline=None):
  # Optional protobuf-field absence alone does not prove a paid game. Only an
  # explicit boolean from this matching successful public listing may fill it.
@@ -171,6 +173,14 @@ def owner_fields(appid,data,checked_at):
    if len(names)==20:break
   record.update(category=names[0],tags=names)
  return record
+def review_fields(appid,data,checked_at):
+ # The public review summary is global across the requested all-language scope.
+ if type(appid) is not int or not 1<=appid<=MAX_APP_ID or type(checked_at) is not int or not 1<=checked_at<=9007199254740991:raise ValueError('Invalid review identity or timestamp')
+ if not isinstance(data,dict) or type(data.get('success')) is not int or data['success']!=1 or not isinstance(data.get('query_summary'),dict):raise ValueError('Unavailable Steam review summary')
+ summary=data['query_summary'];positive=summary.get('total_positive');negative=summary.get('total_negative');total=summary.get('total_reviews')
+ if any(type(n) is not int or not 0<=n<=9007199254740991 for n in (positive,negative,total)) or positive+negative!=total:raise ValueError('Invalid Steam review counts')
+ if total==0:return {}
+ return {'rating':5*positive/total,'rating_count':total,'rating_source':'steam_reviews','rating_checked_at':checked_at}
 def owner_phase(tr,state,deadline):
  # Server selects due saved games; no ever-growing pending-AppID checkpoint.
  if deadline-time.monotonic()<=1:return {'collected':0,'failed':0,'deferred':0}
