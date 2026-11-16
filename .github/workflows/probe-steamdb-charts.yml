@@ -1,6 +1,11 @@
 name: Test one SteamDB charts page
 on:
   workflow_dispatch:
+    inputs:
+      browser:
+        description: Use one bounded browser-service request (may interact with Cloudflare verification)
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -9,22 +14,41 @@ concurrency:
 jobs:
   probe:
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 5
     steps:
+      - name: Start official browser service
+        if: inputs.browser
+        run: |
+          docker run -d --name solver --shm-size=1g --tmpfs /tmp:exec,mode=1777,size=1G -p 127.0.0.1:8191:8191 -e LOG_LEVEL=INFO ghcr.io/flaresolverr/flaresolverr:latest
+          for attempt in $(seq 1 60); do
+            if curl --silent --max-time 2 --output /dev/null http://127.0.0.1:8191/; then exit 0; fi
+            sleep 1
+          done
+          exit 1
       - name: Fetch one public charts page
+        env:
+          USE_BROWSER: ${{ inputs.browser }}
         run: |
           python3 - <<'PYTHON'
           import json,re,time,urllib.request,urllib.error,os
           url='https://steamdb.info/app/730/charts/'
           started=time.monotonic()
-          request=urllib.request.Request(url,headers={'User-Agent':'SyzozSteamSample/1.0'})
-          try:
-              response=urllib.request.urlopen(request,timeout=20)
-              status=response.status;body=response.read(2000000).decode('utf-8','replace')
-          except urllib.error.HTTPError as error:
-              status=error.code;body=error.read(2000000).decode('utf-8','replace')
+          browser=os.environ.get('USE_BROWSER')=='true'
+          if browser:
+              command={'cmd':'request.get','url':url,'maxTimeout':60000}
+              request=urllib.request.Request('http://127.0.0.1:8191/v1',json.dumps(command).encode(),{'Content-Type':'application/json'})
+              with urllib.request.urlopen(request,timeout=75) as response:reply=json.load(response)
+              solution=reply.get('solution') or {}
+              status=solution.get('status');body=solution.get('response') or ''
+          else:
+              request=urllib.request.Request(url,headers={'User-Agent':'SyzozSteamSample/1.0'})
+              try:
+                  response=urllib.request.urlopen(request,timeout=20)
+                  status=response.status;body=response.read(2000000).decode('utf-8','replace')
+              except urllib.error.HTTPError as error:
+                  status=error.code;body=error.read(2000000).decode('utf-8','replace')
           title=re.search(r'<title>(.*?)</title>',body,re.S)
-          result={'url':url,'http_status':status,'bytes':len(body.encode()),'seconds':round(time.monotonic()-started,2),'title':title.group(1) if title else None,'chart_page_verified':status==200 and 'Owner estimations' in body and 'Steam charts' in body,'captcha_interaction':False,'production_modified':False}
+          result={'url':url,'http_status':status,'bytes':len(body.encode()),'seconds':round(time.monotonic()-started,2),'title':title.group(1) if title else None,'chart_page_verified':status==200 and 'Owner estimations' in body and 'Steam charts' in body,'browser_service':browser,'captcha_interaction':'possible' if browser else False,'production_modified':False}
           print(json.dumps(result),flush=True)
           with open('steamdb-charts-result.json','w') as f:json.dump(result,f,indent=2)
           with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write('## One-page SteamDB access test\n```json\n'+json.dumps(result,indent=2)+'\n```\n')
@@ -36,3 +60,6 @@ jobs:
           name: steamdb-charts-one-page-result
           path: steamdb-charts-result.json
           retention-days: 3
+      - name: Stop browser service
+        if: always() && inputs.browser
+        run: docker rm -f solver || true
