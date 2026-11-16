@@ -23,6 +23,7 @@ ATTRIBUTES = ['objectID', 'name', 'technologies', 'lastUpdated']
 MAX_BODY = 2_000_000
 MAX_SECONDS = 90
 SOURCE_JS = 'https://steamdb.info/static/js/instantsearch.js?v=b0745b3208743f8e'
+PUBLIC_CLIENT_SOURCE = 'https://gist.githubusercontent.com/Salada/50078120e8d6209c0d252984d79f53a1/raw/5617843d9992b62c22a90ebd1e8c0ec0764ccc74/fuck.gs'
 
 
 class ProbeError(RuntimeError):
@@ -44,17 +45,38 @@ class ConfigParser(HTMLParser):
             self.configs.append((attrs.get('data-a'), attrs.get('data-k')))
 
 
+def validate_config(app, key):
+    if not isinstance(app, str) or not re.fullmatch(r'[A-Z0-9]{5,32}', app):
+        raise ProbeError('Invalid public search application ID')
+    if not isinstance(key, str) or not 16 <= len(key) <= 4096 or not key.isascii() or any(c.isspace() for c in key):
+        raise ProbeError('Public search key unavailable')
+    return app, key
+
+
 def parse_config(html):
     parser = ConfigParser()
     parser.feed(html)
     parser.close()
     if len(parser.configs) != 1:
         raise ProbeError('Exactly one public search configuration required')
-    app, key = parser.configs[0]
-    if not isinstance(app, str) or not re.fullmatch(r'[A-Z0-9]{5,32}', app):
-        raise ProbeError('Invalid public search application ID')
-    if not isinstance(key, str) or not 16 <= len(key) <= 4096 or not key.isascii() or any(c.isspace() for c in key):
-        raise ProbeError('Public search key unavailable')
+    return validate_config(*parser.configs[0])
+
+
+def parse_public_client(source):
+    """Read the published URL constant as text; never execute the source."""
+    match = re.search(r'\bvar\s+url\s*=\s*"([^"\r\n]+)"', source)
+    indices = set(re.findall(r'"indexName"\s*:\s*"([^"\r\n]+)"', source))
+    if not match or indices != {INDEX}:
+        raise ProbeError('Published public client search configuration does not match')
+    url = urllib.parse.urlsplit(match.group(1))
+    params = urllib.parse.parse_qs(url.query)
+    apps, keys = params.get('x-algolia-application-id', []), params.get('x-algolia-api-key', [])
+    if len(apps) != 1 or len(keys) != 1:
+        raise ProbeError('Published public client configuration is ambiguous')
+    app, key = validate_config(apps[0], keys[0])
+    if (url.scheme != 'https' or url.netloc.lower() != app.lower() + '-dsn.algolia.net'
+            or url.path != '/1/indexes/*/queries' or url.fragment):
+        raise ProbeError('Published public client operation does not match')
     return app, key
 
 
@@ -173,10 +195,72 @@ def unavailable(appid, reason):
             'engines': None, 'reason': reason}
 
 
+def store_names(client, appids):
+    payload = {'ids': [{'appid': appid} for appid in appids],
+               'context': {'language': 'english', 'country_code': 'US'},
+               'data_request': {'include_basic_info': True}}
+    url = 'https://api.steampowered.com/IStoreBrowseService/GetItems/v1/?' + urllib.parse.urlencode({'input_json': json.dumps(payload)})
+    status, store = client.json(url, 'store_names')
+    if status != 200:
+        raise ProbeError('Steam JSON name discovery failed')
+    rows = store.get('response', {}).get('store_items', []) if isinstance(store, dict) else []
+    return {row.get('appid', row.get('id')): row.get('name') for row in rows
+            if isinstance(row, dict) and row.get('success') == 1}
+
+
+def matching_hit(reply, appid):
+    hits = reply.get('hits', []) if isinstance(reply, dict) else []
+    matches = [hit for hit in hits if isinstance(hit, dict) and str(hit.get('objectID')) == str(appid)]
+    if len(matches) != 1:
+        raise ProbeError('Search did not return exactly one matching AppID')
+    return product(matches[0], appid)
+
+
+def published_client_search(client, appids):
+    status, source = client.request(PUBLIC_CLIENT_SOURCE, 'published_public_client')
+    if status != 200:
+        raise ProbeError('Published public client source unavailable: HTTP ' + str(status))
+    app, key = parse_public_client(source.decode('utf-8', errors='replace'))
+    client.key = key
+    config = {'application_id': app, 'key_sha256': hashlib.sha256(key.encode()).hexdigest(),
+              'index': INDEX, 'discovery_url': PUBLIC_CLIENT_SOURCE,
+              'discovery_type': 'published_public_search_client', 'published_date': '2018-06-24',
+              'note': 'Historical public client; current key validity and coverage are not assumed'}
+    client.config = config
+    names = store_names(client, appids)
+    requests = []
+    for appid in appids:
+        name = names.get(appid)
+        if not isinstance(name, str) or not name.strip():
+            raise ProbeError('Steam JSON name unavailable; no manually supplied query used')
+        params = {'query': name, 'hitsPerPage': 10, 'attributesToRetrieve': json.dumps(ATTRIBUTES),
+                  'attributesToHighlight': '[]', 'typoTolerance': 'false'}
+        requests.append({'indexName': INDEX, 'params': urllib.parse.urlencode(params)})
+    headers = {'X-Algolia-Application-Id': app, 'X-Algolia-API-Key': key}
+    status, reply = client.json(f'https://{app}-dsn.algolia.net/1/indexes/*/queries',
+                                'published_client_queries', {'requests': requests}, headers)
+    if status != 200:
+        raise ProbeError('Published public client search denied: HTTP ' + str(status))
+    replies = reply.get('results') if isinstance(reply, dict) else None
+    if not isinstance(replies, list) or len(replies) != len(appids):
+        raise ProbeError('Unexpected public-client batch search response')
+    results = []
+    for appid, found in zip(appids, replies):
+        try:
+            results.append(matching_hit(found, appid))
+        except ProbeError as error:
+            results.append(unavailable(appid, str(error)))
+    return config, results
+
+
 def run(client, appids):
     status, html = client.request(BOOTSTRAP, 'bootstrap_standard')
     if status == 403:
         status, html = client.request(BOOTSTRAP, 'bootstrap_tls', tls=True)
+    if status == 403:
+        # One independently published public search client, not a key rotation
+        # or retry following an Algolia permission denial.
+        return published_client_search(client, appids)
     if status != 200:
         raise ProbeError('Public configuration unavailable: HTTP ' + str(status))
     lowered = html.lower()
@@ -199,16 +283,7 @@ def run(client, appids):
     # can fall back to the public client's normal search operation.
     if status not in (403, 405) or (status == 403 and 'method not allowed' not in message.lower()):
         raise ProbeError('Algolia retrieval denied: HTTP ' + str(status))
-    payload = {'ids': [{'appid': appid} for appid in appids],
-               'context': {'language': 'english', 'country_code': 'US'},
-               'data_request': {'include_basic_info': True}}
-    url = 'https://api.steampowered.com/IStoreBrowseService/GetItems/v1/?' + urllib.parse.urlencode({'input_json': json.dumps(payload)})
-    status, store = client.json(url, 'store_names')
-    if status != 200:
-        raise ProbeError('Steam JSON name discovery failed')
-    rows = store.get('response', {}).get('store_items', []) if isinstance(store, dict) else []
-    names = {row.get('appid', row.get('id')): row.get('name') for row in rows
-             if isinstance(row, dict) and row.get('success') == 1}
+    names = store_names(client, appids)
     results = []
     for appid in appids:
         name = names.get(appid)
@@ -221,12 +296,8 @@ def run(client, appids):
         if status != 200:
             results.append(unavailable(appid, 'Algolia search denied: HTTP ' + str(status)))
             continue
-        hits = found.get('hits', []) if isinstance(found, dict) else []
-        matches = [hit for hit in hits if isinstance(hit, dict) and str(hit.get('objectID')) == str(appid)]
         try:
-            if len(matches) != 1:
-                raise ProbeError('Search did not return exactly one matching AppID')
-            results.append(product(matches[0], appid))
+            results.append(matching_hit(found, appid))
         except ProbeError as error:
             results.append(unavailable(appid, str(error)))
     return config, results
