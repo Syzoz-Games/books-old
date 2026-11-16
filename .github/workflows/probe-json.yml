@@ -1,0 +1,43 @@
+name: Probe Steam JSON batch fields
+on:
+  workflow_dispatch:
+    inputs:
+      appids:
+        description: One or two AppIDs to inspect with JSON APIs
+        required: true
+        default: '4704690'
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: steam-json-fields-probe
+  cancel-in-progress: false
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Request batch JSON and the shared tag dictionary
+        env:
+          SAMPLE_APP_IDS: ${{ inputs.appids }}
+        run: |
+          python - <<'PYCODE'
+          import os,re,subprocess,sys
+          ids=os.environ['SAMPLE_APP_IDS'].replace(',',' ').split()
+          if not 1<=len(ids)<=2 or len(set(ids))!=len(ids) or any(not re.fullmatch(r'[1-9][0-9]{0,9}',i) for i in ids):
+              raise SystemExit('One or two unique numeric AppIDs required')
+          subprocess.run([sys.executable,'probe-json.py','--appids',*ids],check=True)
+          PYCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: steam-json-fields-${{ github.run_id }}
+          path: |
+            json-probe-result.json
+            json-probe-raw.json
+          if-no-files-found: warn
+          retention-days: 3
