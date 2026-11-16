@@ -1,6 +1,24 @@
 name: Admin catalog sync · Steam
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Resume catalog or enrich games already saved
+        type: choice
+        options: [collect, enrich]
+        default: collect
+      seconds:
+        description: Bounded total runtime (60-1800 seconds)
+        type: string
+        default: '1500'
+      owners_seconds:
+        description: Ownership and engine backlog budget (0-600 seconds)
+        type: string
+        default: '300'
+      engine_seconds:
+        description: Engine lookup share of backlog budget (0-120 seconds)
+        type: string
+        default: '60'
 permissions:
   contents: read
 concurrency:
@@ -16,8 +34,17 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - name: Resume anonymous collection
+      - name: Resume collection or saved-game enrichment
         env:
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
           STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
-        run: python collect.py --seconds 1500 --batch 1000
+          SYNC_MODE: ${{ inputs.mode || 'collect' }}
+          SYNC_SECONDS: ${{ inputs.seconds || '1500' }}
+          OWNERS_SECONDS: ${{ inputs.owners_seconds || '300' }}
+          ENGINE_SECONDS: ${{ inputs.engine_seconds || '60' }}
+        run: |
+          case "$SYNC_MODE" in
+            collect) python collect.py --seconds "$SYNC_SECONDS" --owners-seconds "$OWNERS_SECONDS" --engine-seconds "$ENGINE_SECONDS" --batch 1000 ;;
+            enrich) python collect.py --enrich-only --seconds "$SYNC_SECONDS" --owners-seconds "$OWNERS_SECONDS" --engine-seconds "$ENGINE_SECONDS" ;;
+            *) echo 'Invalid sync mode'; exit 1 ;;
+          esac
