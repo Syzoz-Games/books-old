@@ -316,7 +316,12 @@ def store_dates(records,deadline=None,tag_names=None,include_details=False):
     if is_free is True:r['price']='0'
     elif isinstance(price,str) and 0<len(price.strip())<=200 and not any(ord(c)<32 or 0xD800<=ord(c)<=0xDFFF for c in price):r['price']=price.strip()
     rel=a.get('release') or {};released=timestamp(rel.get('steam_release_date'));original=timestamp(rel.get('original_release_date'))
-    if not r['release_ts'] and released:r['release_ts']=released
+    # StoreBrowse reports the current public date; PICS can retain a planned date after launch.
+    if released:
+     now=datetime.now(timezone.utc).timestamp()
+     listed_as_released=rel.get('is_coming_soon',r.get('coming_soon')) is False
+     if not r['release_ts'] or (listed_as_released and released<=now<r['release_ts']):
+      r['release_ts']=released
     if original:r['original_release_ts']=original
     if type(rel.get('is_coming_soon')) is bool:r['coming_soon']=rel['is_coming_soon']
     assets=a.get('assets');assets=assets if isinstance(assets,dict) else {};image_hash=assets.get('community_icon')
@@ -368,47 +373,69 @@ def review_fields(appid,data,checked_at):
  if any(type(n) is not int or not 0<=n<=9007199254740991 for n in (positive,negative,total)) or positive+negative!=total:raise ValueError('Invalid Steam review counts')
  if total==0:return {}
  return {'rating':5*positive/total,'rating_count':total,'rating_source':'steam_reviews','rating_checked_at':checked_at}
-def owner_phase(tr,state,deadline):
- # Server selects due saved games; no ever-growing pending-AppID checkpoint.
- if deadline-time.monotonic()<=1:return {'collected':0,'failed':0,'deferred':0}
- reply=tr.call('owner-candidates',limit=50);candidates=reply.get('records') if isinstance(reply,dict) else None
- if not isinstance(candidates,list) or len(candidates)>50:raise RuntimeError('Invalid ownership candidates response')
- ids=[r.get('appid') if isinstance(r,dict) else None for r in candidates]
- if any(type(i) is not int or not 1<=i<=MAX_APP_ID for i in ids) or len(set(ids))!=len(ids):raise RuntimeError('Invalid ownership candidate IDs')
- records=[];games=[];failed=[];next_request=0.0
- for appid in ids:
-  wait=max(0.0,next_request-time.monotonic())
-  if deadline-time.monotonic()<=wait+1:break
-  if wait:time.sleep(wait)
-  remaining=deadline-time.monotonic()
-  if remaining<=1:break
-  timeout=min(8.0,remaining);next_request=time.monotonic()+1.0
-  try:
-   url='https://steamspy.com/api.php?'+urllib.parse.urlencode({'request':'appdetails','appid':appid})
-   with Timeout(timeout,OSError('Ownership request timed out')):
-    with urllib.request.urlopen(url,timeout=timeout) as response:raw=response.read(1000001)
-   if len(raw)>1000000:raise ValueError('Ownership response too large')
-   checked_at=int(time.time());record=owner_estimates(owner_fields(appid,json.loads(raw),checked_at))
-   records.append(record);games.append({'package':'steam:'+str(appid),'revision':checked_at,'points':[{'observed_at':checked_at,'total_installs':record['installs'],'period':1}]})
-  except urllib.error.HTTPError as error:
-   failed.append(appid)
-   error.close()
-   if error.code in (429,503):break
-  except (OSError,ValueError,OverflowError):failed.append(appid)
- if records or failed:
-  state.update(status='running',phase='owners',heartbeat=int(time.time()))
-  payload={'state':state,'records':records,'failed_appids':failed}
-  if games:payload['install_history']={'schema':1,'mode':'merge','games':games}
-  tr.call('owners',**payload)
- return {'collected':len(records),'failed':len(failed),'deferred':len(ids)-len(records)-len(failed)}
+def owner_phase(tr,state,deadline,engine_seconds=0):
+ # Refill from saved records until the bounded budget ends, independent of PICS.
+ # One shared timer spans every page: SteamSpy appdetails starts <= once/second.
+ totals={'collected':0,'failed':0,'deferred':0};seen=set();next_request=0.0;engine_left=max(0,engine_seconds)
+ while deadline-time.monotonic()>1:
+  reply=tr.call('owner-candidates',limit=50);candidates=reply.get('records') if isinstance(reply,dict) else None
+  if not isinstance(candidates,list) or len(candidates)>50:raise RuntimeError('Invalid ownership candidates response')
+  ids=[r.get('appid') if isinstance(r,dict) else None for r in candidates]
+  if any(type(i) is not int or not 1<=i<=MAX_APP_ID for i in ids) or len(set(ids))!=len(ids):raise RuntimeError('Invalid ownership candidate IDs')
+  candidates=[r for r in candidates if r['appid'] not in seen]
+  if not candidates:break
+  seen.update(r['appid'] for r in candidates)
+  engines=[]
+  if engine_left>1 and deadline-time.monotonic()>2:
+   pending=[dict(appid=r['appid'],type='game',name=r['name'],coming_soon=False,architectures=None) for r in candidates if r.get('engine_due') is True and isinstance(r.get('name'),str) and r['name']]
+   if pending:
+    before=time.monotonic();fetch_engines(pending,min(deadline-1,before+engine_left));engine_left=max(0,engine_left-(time.monotonic()-before))
+    engines=[{'appid':r['appid'],'architectures':r.get('architectures') or None,'checked_at':int(time.time())} for r in pending]
+  records=[];games=[];failed=[];stopped=False;attempted=0
+  for candidate in candidates:
+   if candidate.get('owners_due') is False:continue
+   appid=candidate['appid'];wait=max(0.0,next_request-time.monotonic())
+   if deadline-time.monotonic()<=wait+1:break
+   if wait:time.sleep(wait)
+   remaining=deadline-time.monotonic()
+   if remaining<=1:break
+   timeout=min(8.0,remaining);next_request=time.monotonic()+1.0;attempted+=1
+   try:
+    url='https://steamspy.com/api.php?'+urllib.parse.urlencode({'request':'appdetails','appid':appid})
+    with Timeout(timeout,OSError('Ownership request timed out')):
+     with urllib.request.urlopen(url,timeout=timeout) as response:raw=response.read(1000001)
+    if len(raw)>1000000:raise ValueError('Ownership response too large')
+    checked_at=int(time.time());record=owner_estimates(owner_fields(appid,json.loads(raw),checked_at))
+    records.append(record);games.append({'package':'steam:'+str(appid),'revision':checked_at,'points':[{'observed_at':checked_at,'total_installs':record['installs'],'period':1}]})
+   except urllib.error.HTTPError as error:
+    failed.append(appid);code=error.code;error.close()
+    if code in (403,429,503):stopped=True;break
+   except (OSError,ValueError,OverflowError):failed.append(appid)
+  if records or failed or engines:
+   state.update(status='running',phase='owners',heartbeat=int(time.time()));payload={'state':state,'records':records,'failed_appids':failed}
+   if games:payload['install_history']={'schema':1,'mode':'merge','games':games}
+   if engines:payload['engine_records']=engines
+   tr.call('owners',**payload)
+  totals['collected']+=len(records);totals['failed']+=len(failed)
+  deferred=sum(r.get('owners_due') is not False for r in candidates)-attempted;totals['deferred']+=deferred
+  print(json.dumps({'phase':'enrichment','owners_saved':len(records),'owners_failed':len(failed),'engines_saved':sum(bool(r['architectures']) for r in engines),'engines_checked':len(engines),'deferred':deferred}),flush=True)
+  if stopped or deferred or (not records and not failed and not engines):break
+ return totals
+
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--seconds',type=int,default=1500);ap.add_argument('--owners-seconds',type=int,default=60);ap.add_argument('--batch',type=int,default=1000);ap.add_argument('--local');ap.add_argument('--scan-to',type=int,default=MAX_APP_ID);args=ap.parse_args()
- if not 1<=args.batch<=5000 or not 1<=args.scan_to<=MAX_APP_ID or args.seconds<1 or not 0<=args.owners_seconds<=300:raise ValueError('Invalid scan bounds or ownership budget')
+ ap=argparse.ArgumentParser();ap.add_argument('--seconds',type=int,default=1500);ap.add_argument('--owners-seconds',type=int,default=300);ap.add_argument('--engine-seconds',type=int,default=60);ap.add_argument('--enrich-only',action='store_true');ap.add_argument('--batch',type=int,default=1000);ap.add_argument('--local');ap.add_argument('--scan-to',type=int,default=MAX_APP_ID);args=ap.parse_args()
+ if not 1<=args.batch<=5000 or not 1<=args.scan_to<=MAX_APP_ID or not 1<=args.seconds<=1800 or args.enrich_only and args.local or not 0<=args.owners_seconds<=600 or not 0<=args.engine_seconds<=120:raise ValueError('Invalid scan bounds or ownership budget')
  tr=Transport(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/game-explorer/steam-sync.php'),os.environ.get('STEAM_SYNC_TOKEN',''),args.local)
  if not args.local and len(tr.token)<32:raise ValueError('Missing Steam upload credential')
  state=initial()|tr.call('state');state.update(status='starting',heartbeat=int(time.time()),run_id=os.environ.get('GITHUB_RUN_ID','local')+'-'+os.environ.get('GITHUB_RUN_ATTEMPT','1'));tr.call('begin',state=state)
- client=SteamClient();started=time.monotonic();error=None;owner_budget=0 if args.local else min(args.owners_seconds,max(0,args.seconds-30));catalog_deadline=started+args.seconds-owner_budget
+ client=None;started=time.monotonic();error=None;owner_budget=0 if args.local else min(args.owners_seconds,max(0,args.seconds-1));owner_remaining=owner_budget
  try:
+  if owner_budget:
+   before=time.monotonic();budget=owner_budget if args.enrich_only else owner_budget/2
+   summary=owner_phase(tr,state,min(started+args.seconds,before+budget),args.engine_seconds if args.enrich_only else args.engine_seconds/2);owner_remaining=max(0,owner_budget-(time.monotonic()-before));print(json.dumps(dict(phase='owners',**summary)),flush=True)
+  if args.enrich_only:
+   state.update(status='checkpointed',phase='Enrichment checkpoint saved',heartbeat=int(time.time()));tr.call('finish',state=state);return
+  catalog_deadline=started+args.seconds-owner_remaining;client=SteamClient()
   with Timeout(60,RuntimeError('Steam anonymous login timed out')):
    if client.anonymous_login()!=EResult.OK:raise RuntimeError('Anonymous login rejected')
   if not state['change_number']:state['change_number']=client.get_changes_since(0,app_changes=True,package_changes=False).current_change_number
@@ -455,13 +482,14 @@ def main():
     elif kind=='changes':state['pending_changes']=state['pending_changes'][len(ids):]
     tr.call('checkpoint',state=state);time.sleep(3)
    time.sleep(1)
-  if owner_budget:
-   summary=owner_phase(tr,state,min(started+args.seconds,time.monotonic()+owner_budget));print(json.dumps(dict(phase='owners',**summary)),flush=True)
+  if owner_remaining:
+   summary=owner_phase(tr,state,min(started+args.seconds,time.monotonic()+owner_remaining),args.engine_seconds/2);print(json.dumps(dict(phase='owners',**summary)),flush=True)
   state.update(status='checkpointed',phase='Waiting for next run',heartbeat=int(time.time()));tr.call('finish',state=state)
  except BaseException as e:
   error=e;state.update(status='failed',last_error=type(e).__name__+': '+str(e),heartbeat=int(time.time()));
   try:tr.call('finish',state=state)
   except Exception:pass
- finally:client.logout()
+ finally:
+  if client is not None:client.logout()
  if error:raise error
 if __name__=='__main__':main()
