@@ -12,7 +12,7 @@ on:
         type: string
         default: '900'
       metadata_batches:
-        description: Maximum 50-game metadata batches (0-200)
+        description: 50-game metadata batches per round, between maps (0-200)
         type: string
         default: '20'
 permissions:
