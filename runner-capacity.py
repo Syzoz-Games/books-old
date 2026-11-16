@@ -14,7 +14,7 @@ import collect
 def fetch_sample():
     client = batch.JsonClient(120, interval=1)
     begin = time.monotonic()
-    manifest = batch.plan_manifest(client, 1000, 1, 1, batch.github_metadata(os.environ))
+    manifest = batch.plan_manifest(client, 1500, 1, 1, batch.github_metadata(os.environ))
     names = collect.parse_store_tags(manifest['tag_dictionary'])
     ids = manifest['appids']
     rows = []
@@ -27,8 +27,11 @@ def fetch_sample():
         for item in doc['response']['store_items']:
             if batch.valid_game(item) and item.get('appid', item.get('id')) in group:
                 rows.append(batch.compact(item))
-    if len(rows) < 50:
-        raise RuntimeError('Too few usable Steam games for the 50-task trial')
+        if len(rows) >= 1000:
+            rows = rows[:1000]
+            break
+    if len(rows) != 1000:
+        raise RuntimeError('Expected 1000 usable Steam games')
     return names, rows, time.monotonic() - begin, len(client.events)
 
 
@@ -43,7 +46,7 @@ def measure(names, rows):
         return hashlib.sha256(batch.compact([record, detail])).digest()
 
     # Keep the sample identical at each setting. All trials run in this one VM.
-    workload = rows * 3
+    workload = rows
     reference = None
     results = {}
     def trial(n):
@@ -51,7 +54,7 @@ def measure(names, rows):
         if n in results:
             return
         durations = []
-        for _ in range(3):
+        for _ in range(5):
             start = time.perf_counter()
             with ThreadPoolExecutor(max_workers=n) as pool:
                 checksum = hashlib.sha256(b''.join(pool.map(process, workload))).hexdigest()
@@ -69,6 +72,7 @@ def measure(names, rows):
     trial(1)
     trial(10)
     trial(50)
+    trial(100)
     n = 2
     plateau = 0
     best = results[1]['games_per_second']
@@ -86,13 +90,13 @@ if __name__ == '__main__':
     results, work, digest = measure(names, rows)
     report = {'cpu_count': len(os.sched_getaffinity(0)), 'unique_games': len(rows),
               'live_requests': requests, 'live_fetch_seconds': round(fetch_seconds, 2),
-              'records_per_trial': work, 'repeats': 3, 'output_sha256': digest,
+              'records_per_trial': work, 'repeats': 5, 'output_sha256': digest,
               'trials': sorted(results, key=lambda r: r['tasks']),
               'fastest_measured': max(results, key=lambda r: r['games_per_second'])}
     Path('capacity.json').write_text(json.dumps(report, indent=2))
     print(json.dumps(report))
     with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
-        print(f"Fetched {len(rows)} games in {fetch_seconds:.2f}s. Replayed {work} records per trial, median of 3 trials.\n", file=f)
+        print(f"Fetched {len(rows)} games in {fetch_seconds:.2f}s. Replayed {work} records per trial, median of 5 trials.\n", file=f)
         print('| Tasks | Replay time (s) | Games/s |\n|---:|---:|---:|', file=f)
         for row in report['trials']:
             print(f"| {row['tasks']} | {row['seconds']} | {row['games_per_second']} |", file=f)
