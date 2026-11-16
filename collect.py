@@ -7,6 +7,7 @@ from steam.client import SteamClient
 from steam.enums import EResult
 from gevent import Timeout
 MAX_APP_ID=2**32-1
+class BatchDataError(ValueError):pass
 class NoRedirect(urllib.request.HTTPRedirectHandler):
  def redirect_request(self,*args,**kw):return None
 class Transport:
@@ -24,6 +25,7 @@ class Transport:
    try:
     with urllib.request.build_opener(NoRedirect).open(req,timeout=90) as r:return json.load(r)
    except urllib.error.HTTPError as e:
+    if action=='batch' and e.code in (400,413,422):raise BatchDataError('Batch rejected: HTTP '+str(e.code)) from None
     if e.code<500:raise RuntimeError('Catalog checkpoint rejected: HTTP '+str(e.code)) from None
     if attempt==2:raise
    except OSError:
@@ -35,7 +37,7 @@ def send_catalog_batch(tr,previous,state,records,details,audit,max_body=5500000,
  # Validate and partition before sending. Only the last chunk commits the new
  # scan cursor/counters; earlier writes replay safely after an interrupted send.
  byid={row['appid']:row for row in details}
- if len(byid)!=len(details) or not set(byid).issubset({row['appid'] for row in records}):raise ValueError('Unmatched or duplicate detail document')
+ if len(byid)!=len(details) or not set(byid).issubset({row['appid'] for row in records}):raise BatchDataError('Unmatched or duplicate detail document')
  interim=dict(previous)
  for key in ('run_id','status','phase','heartbeat','batch_from','batch_to'):
   if key in state:interim[key]=state[key]
@@ -45,12 +47,12 @@ def send_catalog_batch(tr,previous,state,records,details,audit,max_body=5500000,
   detail=byid.get(row['appid']);row_bytes=len(wire_json(row));doc_bytes=len(wire_json(detail)) if detail is not None else 0
   # PHP validators may escape non-ASCII/slashes when measuring decoded docs.
   measured=len(json.dumps(detail,separators=(',',':'),ensure_ascii=True).replace('/','\\/').encode()) if detail is not None else 0
-  if measured>max_detail:raise ValueError('One detail document exceeds the receiver limit')
+  if measured>max_detail:raise BatchDataError('One detail document exceeds the receiver limit')
   extra=row_bytes+(1 if rows else 0)+doc_bytes+(1 if detail is not None and docs else 0)
   extra_detail=measured+(1 if detail is not None and docs else 0)
   if rows and (body_size+extra>max_body or detail_size+extra_detail>max_details):
    chunks.append((rows,docs));rows=[];docs=[];body_size=base;detail_size=2;extra=row_bytes+doc_bytes;extra_detail=measured
-  if body_size+extra>max_body or detail_size+extra_detail>max_details:raise ValueError('One catalog record exceeds the receiver limit')
+  if body_size+extra>max_body or detail_size+extra_detail>max_details:raise BatchDataError('One catalog record exceeds the receiver limit')
   rows.append(row);body_size+=extra;detail_size+=extra_detail
   if detail is not None:docs.append(detail)
  if rows or not chunks:chunks.append((rows,docs))
@@ -300,8 +302,11 @@ def store_dates(records,deadline=None,tag_names=None,include_details=False):
     with urllib.request.urlopen(url,timeout=request_timeout) as response:d=json.load(response)
    byid={r['appid']:r for r in rows}
    for a in d.get('response',{}).get('store_items',[]):
-    r=byid.get(a.get('appid',a.get('id')))
+    # Store aliases can share an AppID. Match each requested listing once.
+    listing_id=a.get('id',a.get('appid'))
+    r=byid.get(listing_id)
     if not r or a.get('success')!=1:continue
+    del byid[listing_id]
     is_free=a.get('is_free')
     if 'is_free' not in a:
      is_free=store_free_status(r['appid'],deadline)
@@ -473,11 +478,15 @@ def main():
     state['heartbeat']=int(time.time());uploading=True;send_catalog_batch(tr,previous,state,records,details,audit)
     print(json.dumps({'phase':kind,'from':min(ids),'to':max(ids),'named':len(records),'games':sum(r['type']=='game' for r in records),'unknown':len(unknown),'unnamed':len(unnamed),'next_id':state['cursor']}),flush=True)
    except Exception as e:
-    # Never swallow a failed server checkpoint: replay the last saved batch next run.
-    if uploading:
-     state=previous
-     raise
-    state['transport_failures']+=1;state['last_error']=str(e);state['failed_batches'].append(ids)
+    state=previous
+    if uploading and not isinstance(e,BatchDataError):raise
+    # Retry data failures on a later run. Smaller groups isolate bad records.
+    if retry:state['failed_batches'].remove(ids)
+    middle=len(ids)//2
+    groups=[ids[:middle],ids[middle:]] if middle and isinstance(e,BatchDataError) else [ids]
+    state['failed_batches'].extend(groups)
+    state['transport_failures']+=1;state['last_error']=str(e)
+    print(f'::warning::Steam {kind} batch {min(ids)}-{max(ids)} queued for retry: {type(e).__name__}: {e}',flush=True)
     if kind=='scan':state['cursor']=max(ids)+1
     elif kind=='changes':state['pending_changes']=state['pending_changes'][len(ids):]
     tr.call('checkpoint',state=state);time.sleep(3)
