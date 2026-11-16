@@ -93,7 +93,7 @@ jobs:
   work:
     needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 17
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -131,7 +131,7 @@ jobs:
           if mode=='replay':
               cmd=[sys.executable,'batch.py','replay','--manifest','manifest.json','--runner',runner,'--directory','prior-results','--output','batch-results']
           else:
-              cmd=[sys.executable,'batch.py','work','--manifest','manifest.json','--runner',runner,'--seconds','900','--owners-limit',os.environ['OWNERS_LIMIT'],'--engine-seconds',os.environ['ENGINE_SECONDS'],'--output','batch-results']
+              cmd=[sys.executable,'batch.py','work','--manifest','manifest.json','--runner',runner,'--seconds','21600','--owners-limit',os.environ['OWNERS_LIMIT'],'--engine-seconds',os.environ['ENGINE_SECONDS'],'--output','batch-results']
               if os.environ['ENGINE_FALLBACKS']=='true':cmd+=['--engine-fallbacks']
           subprocess.run(cmd,check=True)
           PY
