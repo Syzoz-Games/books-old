@@ -2,6 +2,7 @@
 import concurrent.futures
 import datetime as dt
 import gzip
+from email.utils import parsedate_to_datetime
 import html
 import json
 import os
@@ -23,6 +24,19 @@ GAME = re.compile(r"GAME_[A-Z]+(?:_[A-Z]+)*")
 DATA = re.compile(r"AF_initDataCallback\(\{key:\s*'ds:5',\s*hash:[^,]*,\s*data:\s*")
 
 
+TRANSIENT_HTTP = (408, 429, 500, 502, 503, 504)
+
+
+def retry_delay(error):
+    value = (error.headers.get("Retry-After", "") if error.headers else "").strip()
+    if value.isdigit():
+        return int(value)
+    try:
+        return max(0, int(parsedate_to_datetime(value).timestamp() - time.time()) + 1)
+    except (ValueError, TypeError, OverflowError):
+        return 0
+
+
 def get(url, parser, missing_ok=False):
     for attempt in range(4):
         try:
@@ -31,10 +45,12 @@ def get(url, parser, missing_ok=False):
         except HTTPError as err:
             if missing_ok and err.code in (404, 410):
                 return None
-            if err.code not in (408, 429, 500, 502, 503, 504) or attempt == 3:
+            if err.code not in TRANSIENT_HTTP or attempt == 3:
                 raise
-            delay = err.headers.get("Retry-After", "")
-            time.sleep(int(delay) if delay.isdigit() else 2 ** (attempt + 1))
+            delay = retry_delay(err)
+            if missing_ok and delay > 30:
+                raise
+            time.sleep(delay or 2 ** (attempt + 1))
         except (TimeoutError, URLError, ConnectionError):
             if attempt == 3:
                 raise
@@ -155,6 +171,48 @@ def listing(pkg):
     return dict(metadata=metadata,play=play,categories=categories,commerce=commerce)
 
 
+def process_batch(pool, post, packages_to_check, file, retry=False):
+    batch = packages_to_check
+    while batch:
+        claim = post("filter", file=file, packages=batch, retry=retry)
+        if claim["status"] == "done":
+            return True
+        if claim["status"] != "ready":
+            return False
+        wanted = claim["packages"]
+        waiting = [pkg for pkg in batch if pkg not in wanted] if claim["busy"] else []
+        if wanted:
+            games, delays = {}, {}
+            futures = {pool.submit(listing, pkg): pkg for pkg in wanted}
+            for future in concurrent.futures.as_completed(futures):
+                pkg = futures[future]
+                try:
+                    game = future.result()
+                except HTTPError as error:
+                    if error.code not in TRANSIENT_HTTP:
+                        raise
+                    delays[pkg] = max(300, retry_delay(error))
+                    print(f"Deferring {pkg}: HTTP {error.code}", flush=True)
+                except (TimeoutError, URLError, ConnectionError) as error:
+                    delays[pkg] = 300
+                    print(f"Deferring {pkg}: {type(error).__name__}", flush=True)
+                else:
+                    if game:
+                        games[pkg] = game
+            ack = post("submit", file=file, packages=wanted, games=games, retry=retry, retry_after=delays)
+            if ack["status"] == "done":
+                return True
+            if ack["status"] != "saved":
+                return False
+            for pkg in ack["inserted"]:
+                print(games[pkg]["metadata"]["title"], pkg, flush=True)
+            waiting.extend(ack["unowned"])
+        batch = waiting
+        if batch:
+            time.sleep(3)
+    return True
+
+
 def collect(slot):
     token = catalog_credential(os.environ["STEAM_SYNC_TOKEN"])
     run = os.environ["GITHUB_RUN_ID"]+"-"+os.environ["GITHUB_RUN_ATTEMPT"]
@@ -175,33 +233,26 @@ def collect(slot):
     tag,total=opened["snapshot"]["tag"],opened["snapshot"]["total"]
     index=opened["next"]
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
-        while index < total and time.monotonic() < http.deadline-180:
-            context.update(tag=tag,file=index)
-            ids=get(BASE+f"play_sitemaps_{tag}-{index:05}-of-{total}.xml.gz",packages)
-            for offset in range(0,len(ids),40):
-                batch=ids[offset:offset+40]
-                while True:
-                    wanted=post("filter",packages=batch)
-                    if wanted["status"] in ("capped","paused"):
-                        return
-                    if wanted["status"]=="done":
-                        break
-                    pending=wanted["packages"]
-                    if pending:
-                        games={p:g for p,g in zip(pending,pool.map(listing,pending)) if g}
-                        ack=post("submit",packages=pending,games=games)
-                        for p in ack.get("inserted",[]):
-                            print(games[p]["metadata"]["title"],p,flush=True)
-                        if ack["status"] in ("capped","paused"):
-                            return
-                    if not wanted["busy"]:
-                        break
-                    batch=[p for p in batch if p not in pending]
-                    time.sleep(3)
-            done=post("done")
-            if done["status"]!="done":
+        context["tag"] = tag
+        while time.monotonic() < http.deadline-180:
+            retries = post("retries")
+            if retries["status"] != "ready":
                 return
-            index=done["next"]
+            if retries["packages"]:
+                if not process_batch(pool, post, retries["packages"], retries["file"], retry=True):
+                    return
+            if index >= total:
+                if retries["packages"]:
+                    continue
+                return
+            ids = get(BASE+f"play_sitemaps_{tag}-{index:05}-of-{total}.xml.gz", packages)
+            for offset in range(0, len(ids), 40):
+                if not process_batch(pool, post, ids[offset:offset+40], index):
+                    return
+            done = post("done", file=index)
+            if done["status"] != "done":
+                return
+            index = done["next"]
 
 
 if __name__=="__main__":
