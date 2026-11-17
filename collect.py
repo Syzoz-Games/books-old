@@ -430,7 +430,7 @@ def owner_phase(tr,state,deadline,engine_seconds=0):
   if stopped or deferred or (not records and not failed and not engines):break
  return totals
 
-def store_catalog_page(start, deadline, count=100, include_listings=False):
+def store_catalog_page(start, deadline, count=100, include_listings=False, select_ids=None):
  if type(start) is not int or start<0 or type(count) is not int or not 1<=count<=100:raise ValueError('Invalid Store catalog page')
  payload={'query_name':'syzoz_public_catalog_listing_v1','query':{'start':start,'count':count,'sort':2,'filters':{'type_filters':{'include_games':True}}},'context':{'language':'english','country_code':'US'},'data_request':{'include_basic_info':True}}
  remaining=deadline-time.monotonic()
@@ -459,6 +459,10 @@ def store_catalog_page(start, deadline, count=100, include_listings=False):
   if appid in seen:continue
   seen.add(appid);records.append(normalize(appid,{'common':{'name':item['name'],'type':'game'}}))
  if [r['id'] for r in listings]!=sorted(r['id'] for r in listings):raise RuntimeError('Store catalog order changed; page retained for retry')
+ if select_ids is not None:
+  candidates=[r['appid'] for r in records];needed=select_ids(candidates)
+  if not isinstance(needed,list) or any(type(i) is not int for i in needed) or len(set(needed))!=len(needed) or not set(needed).issubset(candidates):raise RuntimeError('Invalid saved-game selection; page retained for retry')
+  needed=set(needed);records=[r for r in records if r['appid'] in needed]
  details=store_dates(records,deadline=deadline,include_details=True)
  if {r['appid'] for r in records}!={r['appid'] for r in details}:raise RuntimeError('Store catalog details incomplete; page retained for retry')
  next_start=start+len(items)
