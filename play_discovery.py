@@ -134,8 +134,6 @@ def listing(pkg):
         return field(entry, *path)
 
     primary = value(79, 0, 0, 2)
-    if not isinstance(primary, str):
-        raise ValueError("Store category missing: " + pkg)
     # Read categories only from this listing's genre and category fields.
     def category_ids(entry):
         if isinstance(entry, list):
@@ -146,6 +144,8 @@ def listing(pkg):
 
     categories = list(dict.fromkeys(category_ids([primary, value(118)])))
     if not categories:
+        if not isinstance(primary, str):
+            print(f"Skipping unclassified listing: {pkg}", flush=True)
         return None
     def plain(s):
         return html.unescape(re.sub(r"<[^>]+>", "", re.sub(r"<br\s*/?>", "\n", s or "", flags=re.I)))
