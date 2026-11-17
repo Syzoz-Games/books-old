@@ -228,7 +228,9 @@ def collect(slot):
     context = dict(scope="play_discovery",slot=slot,run_id=run)
     def post(action, **fields):
         payload=dict(context,action=action,claim_id=uuid.uuid4().hex,**fields)
-        return http.website(METADATA,payload,token,metadata=True,timeout=45)
+        return http.website(METADATA,payload,token,metadata=True,timeout=45,attempts=8)
+    # Spread startup requests across the shared host instead of sending 40 at once.
+    time.sleep(slot * 0.25)
     first=post("status")
     if first["status"]!="ready":
         print(first["status"],first.get("saved",""))
