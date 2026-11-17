@@ -1,0 +1,93 @@
+name: Google Play sitemap benchmark
+on: workflow_dispatch
+permissions: {}
+concurrency:
+  group: play-sitemap-benchmark
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Measure 128 sitemap files with four concurrent readers
+        shell: python
+        run: |
+          import concurrent.futures
+          import gzip
+          import os
+          import random
+          import resource
+          import time
+          import urllib.request
+          import xml.etree.ElementTree as ET
+          from urllib.parse import parse_qs, urlsplit
+          from xml.parsers import expat
+
+          base = "https://play.google.com/sitemaps/"
+          indexes = [base + f"sitemaps-index-{i}.xml" for i in (0, 1)]
+          urls = []
+          for url in indexes:
+              with urllib.request.urlopen(url, timeout=30) as response:
+                  urls.extend(e.text for e in ET.parse(response).findall(".//{*}loc"))
+          urls = list(dict.fromkeys(urls))
+          rng = random.Random(86)
+          count = min(128, len(urls))
+          if not count:
+              raise ValueError("Empty sitemap index")
+          sample = [urls[rng.randrange(i*len(urls)//count, (i+1)*len(urls)//count)] for i in range(count)]
+
+          def read_file(url):
+              if not url.startswith(base) or not url.endswith(".xml.gz"):
+                  raise ValueError("Unexpected sitemap URL")
+              parser = expat.ParserCreate()
+              parts = []
+              packages = set()
+              reading = False
+              def start(name, attributes):
+                  nonlocal reading
+                  if name == "loc":
+                      reading = True
+                      parts.clear()
+              def end(name):
+                  nonlocal reading
+                  if name == "loc":
+                      reading = False
+                      loc = urlsplit("".join(parts))
+                      if loc.path in ("/store/apps/details", "/pc-store/games/details"):
+                          packages.update(parse_qs(loc.query).get("id", []))
+              def characters(value):
+                  if reading:
+                      parts.append(value)
+              parser.StartElementHandler = start
+              parser.EndElementHandler = end
+              parser.CharacterDataHandler = characters
+              with urllib.request.urlopen(url, timeout=30) as response:
+                  compressed = 0
+                  class Counter:
+                      def read(self, size=-1):
+                          nonlocal compressed
+                          chunk = response.read(size)
+                          compressed += len(chunk)
+                          return chunk
+                  with gzip.GzipFile(fileobj=Counter()) as stream:
+                      parser.ParseFile(stream)
+              return compressed, packages
+
+          started = time.monotonic()
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+              results = list(pool.map(read_file, sample))
+          elapsed = time.monotonic() - started
+          transferred = sum(size for size, _ in results)
+          packages = set().union(*(ids for _, ids in results))
+          peak_mib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+          summary = (
+              f"Scanned {count} of {len(urls):,} files in **{elapsed:.2f} seconds** with four readers.\n\n"
+              f"Compressed transfer: {transferred:,} bytes. Unique package IDs in sample: {len(packages):,}.\n\n"
+              f"Peak Python memory: {peak_mib:.1f} MiB. Sitemap files written to disk: 0.\n\n"
+              f"Projected full snapshot: {transferred * len(urls) / count / 1e9:.2f} GB transferred, "
+              f"{elapsed * len(urls) / count / 3600:.2f} hours at this runner's measured rate.\n"
+          )
+          print(summary)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+              output.write(summary)
