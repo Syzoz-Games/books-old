@@ -1,0 +1,72 @@
+name: Steam popularity rankings
+on:
+  workflow_run:
+    workflows: ["Google Play ratings and install history"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: steam-popularity-rankings
+  cancel-in-progress: false
+jobs:
+  plan:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 steam_rankings.py plan
+      - uses: actions/upload-artifact@v4
+        with:
+          name: steam-rank-plan
+          path: rankings-stage/plan.json
+          retention-days: 2
+          if-no-files-found: error
+  collect:
+    needs: plan
+    name: Ranking worker ${{ matrix.slot }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        slot: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: steam-rank-plan
+          path: rankings-stage
+      - run: python3 steam_rankings.py worker --slot "$SLOT"
+        env:
+          SLOT: ${{ matrix.slot }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: steam-rank-worker-${{ matrix.slot }}
+          path: rankings-stage/worker-*.json
+          retention-days: 2
+          if-no-files-found: error
+  publish:
+    needs: [plan, collect]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: steam-rank-*
+          merge-multiple: true
+          path: rankings-stage
+      - name: Validate complete lists and publish atomically
+        run: python3 steam_rankings.py publish
+        env:
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
