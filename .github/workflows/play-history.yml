@@ -1,11 +1,13 @@
 name: Google Play ratings and install history
 on:
+  schedule:
+    - cron: '10 0 * * *'
   workflow_dispatch:
     inputs:
       mode:
-        description: Refresh due games, or test one batch per worker
+        description: Collect due games, force a refresh, or test one batch per worker
         type: choice
-        options: [collect, smoke]
+        options: [collect, force, smoke]
         default: collect
 permissions:
   contents: read
