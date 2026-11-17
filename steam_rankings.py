@@ -73,6 +73,10 @@ def fetch(name, start):
     if data.get('success') != 1 or not isinstance(data.get('total_count'), int):
         raise ValueError('Steam returned an invalid search response')
     total = data['total_count']
+    # Steam normalizes offsets to page boundaries. Never assign requested
+    # positions to a different response page.
+    if data.get('start') != start and start < total:
+        raise ValueError(f'{name}: requested offset {start}, received {data.get("start")}')
     parser = Rows()
     parser.feed(data.get('results_html', ''))
     if total < 1 or len(parser.rows) != min(PAGE_SIZE, max(0, total - start)):
@@ -154,7 +158,7 @@ def assemble(folder, verify_live=True):
                     break
                 tail += PAGE_SIZE
         totals[name] = total
-        ranks, identities = {}, set()
+        ranks, identities, duplicates = {}, set(), 0
         for offset in range(0, total, PAGE_SIZE):
             page = pages.get((name, offset))
             expected = min(PAGE_SIZE, total - offset)
@@ -164,10 +168,16 @@ def assemble(folder, verify_live=True):
                 raise ValueError('Incomplete page in staging')
             for index, row in enumerate(page['rows'], offset + 1):
                 if row['key'] in identities or row['appid'] is not None and row['appid'] in ranks:
-                    raise ValueError(f'{name}: pagination shifted or duplicate product detected; live files unchanged')
+                    # Steam's own searchpage.js InitInfiniteScroll hides later
+                    # duplicates. Its public search has no frozen-snapshot cursor.
+                    # Keep the first observed source position, never overwrite it
+                    # or invent a compact rank after removing repeats.
+                    duplicates += 1
+                    continue
                 identities.add(row['key'])
                 if row['appid'] is not None:
                     ranks[row['appid']] = index
+        print(f'{name}: {total} source positions checked, {len(ranks)} unique apps, {duplicates} repeated rows hidden (Steam search behavior)', flush=True)
         files[name] = ranks
         save(folder / (name + '.json'), ranks)
     return dict(schema=1, run_id=manifest['run_id'], attempt=manifest['attempt'],
