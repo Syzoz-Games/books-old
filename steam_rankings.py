@@ -56,7 +56,9 @@ def request(url, data=None, headers=None):
         except HTTPError as error:
             if error.code not in (408, 429, 500, 502, 503, 504) or attempt == 5:
                 raise
-            delay = min(60, max(2 ** attempt, int(error.headers.get('Retry-After', '0')) if error.headers.get('Retry-After', '').isdigit() else 0))
+            retry_after = error.headers.get('Retry-After', '')
+            delay = max(min(120, (30 if error.code == 429 else 1) * 2 ** attempt), int(retry_after) if retry_after.isdigit() else 0)
+            print(f'HTTP {error.code} from {urlparse(url).hostname}; retry {attempt + 1}/5 in {delay}s', flush=True)
         except (URLError, TimeoutError, ConnectionError, json.JSONDecodeError):
             if attempt == 5:
                 raise
@@ -113,7 +115,7 @@ def worker(folder, slot):
             raise ValueError(f'{name}: list size changed during collection; previous published snapshot retained')
         pages.append(page)
         print(f'Worker {slot}: {name} {start + len(page["rows"])}/{page["total"]}', flush=True)
-        time.sleep(2)
+        time.sleep(.25)
     save(folder / f'worker-{slot}.json', dict(slot=slot, plan=digest, pages=pages))
 
 
