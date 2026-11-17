@@ -99,7 +99,7 @@ def mobile_finish(m,args,plan):
 def steam_transport(m):return m.Transport(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/game-explorer/steam-sync.php'),credential('steam',m))
 
 def steam_plan(m,args,run):
- _,_,_,total,_=m.store_catalog_page(0,time.monotonic()+90,count=1)
+ _,_,_,total,_=m.store_catalog_page(0,time.monotonic()+90,count=1,select_ids=lambda ids:[])
  reply=steam_transport(m).call('parallel-begin',run_id=run,workers=10,total=total,query_sort=2,listing_protocol=1)
  return {'schema':1,'provider':'steam','workers':10,'query_sort':2,'listing_protocol':1,'run_id':run,'total':reply['total'],'offsets':reply['offsets'],'generation':reply['generation']}
 
@@ -108,8 +108,13 @@ def steam_work(m,args,plan):
  session=uuid.uuid4().hex;receipt=tr.call('parallel-worker',run_id=plan['run_id'],worker=args.worker,generation=plan['generation'],session=session);offset=receipt['next_offset']
  while offset<plan['total'] and deadline-time.monotonic()>60:
   records=details=None
+  selection={}
+  def select_ids(ids):
+   reply=tr.call('parallel-filter',run_id=plan['run_id'],worker=args.worker,generation=plan['generation'],session=session,offset=offset,appids=ids)
+   needed=reply.get('needed_ids');selection.update(candidates=len(ids),needed=len(needed) if isinstance(needed,list) else 0)
+   return needed
   for attempt in range(3):
-   try:records,details,_,_,_,listings=m.store_catalog_page(offset,deadline,include_listings=True);break
+   try:records,details,_,_,_,listings=m.store_catalog_page(offset,deadline,include_listings=True,select_ids=select_ids);break
    except (OSError,ValueError,RuntimeError):
     if attempt==2:raise
     time.sleep(attempt+1)
@@ -123,7 +128,7 @@ def steam_work(m,args,plan):
   m.send_catalog_batch(page,base,{**base,'page_done':True},records,details,'',max_body=5_400_000)
   next_offset=page.receipt.get('next_offset')
   if type(next_offset) is not int or next_offset!=offset+100*plan['workers']:raise ValueError('Invalid Steam page receipt')
-  print(json.dumps({'worker':args.worker,'offset':offset,'next_offset':next_offset,'games':len(records),'exceptions':[r for r in listings if 'outcome' in r]}),flush=True);offset=next_offset
+  print(json.dumps({'worker':args.worker,'offset':offset,'next_offset':next_offset,'games':len(records),'already_saved':selection.get('candidates',0)-selection.get('needed',0),'exceptions':[r for r in listings if 'outcome' in r]}),flush=True);offset=next_offset
  return {'worker':args.worker,'next_offset':offset,'checkpointed':True}
 
 def steam_finish(m,args,plan):
