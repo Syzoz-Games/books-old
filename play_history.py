@@ -23,7 +23,7 @@ def collect(slot, smoke):
     try:
         while time.monotonic() < deadline:
             claim = uuid.uuid4().hex
-            batch = post("claim", claim)
+            batch = post("claim", claim, force=os.environ.get("MODE") == "force")
             if batch["status"] in ("idle", "paused"):
                 break
             packages = batch["packages"]
