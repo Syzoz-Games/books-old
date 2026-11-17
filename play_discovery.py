@@ -114,6 +114,10 @@ def field(value, *path):
         return None
 
 
+class ListingDataError(ValueError):
+    """The response did not contain a verified listing for the requested package."""
+
+
 def listing(pkg):
     raw = get("https://play.google.com/store/apps/details?id=" + pkg + "&hl=en&gl=US",
               lambda r: r.read().decode("utf-8"), missing_ok=True)
@@ -121,10 +125,10 @@ def listing(pkg):
         return None
     match = DATA.search(raw)
     if not match:
-        raise ValueError("Store listing data missing: " + pkg)
+        raise ListingDataError("missing Play listing data")
     data = json.JSONDecoder().raw_decode(raw, match.end())[0]
     if field(data, 1, 3, "12", 0, 0) != pkg:
-        raise ValueError("Unexpected Play listing identity: " + pkg)
+        raise ListingDataError("unexpected Play listing identity")
     values = data[1][2]
 
     def value(index, *path):
@@ -188,6 +192,10 @@ def process_batch(pool, post, packages_to_check, file, retry=False):
                 pkg = futures[future]
                 try:
                     game = future.result()
+                except (ListingDataError, json.JSONDecodeError, UnicodeDecodeError) as error:
+                    # The same package may return a valid listing on the next request.
+                    delays[pkg] = 300
+                    print(f"Deferring {pkg}: {error}", flush=True)
                 except HTTPError as error:
                     if error.code not in TRANSIENT_HTTP:
                         raise
