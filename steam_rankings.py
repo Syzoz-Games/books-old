@@ -111,8 +111,6 @@ def worker(folder, slot):
     pages = []
     for name, start in manifest['tasks'][slot::WORKERS]:
         page = manifest['first'][name] if start == 0 else fetch(name, start)
-        if page['total'] != manifest['totals'][name]:
-            raise ValueError(f'{name}: list size changed during collection; previous published snapshot retained')
         pages.append(page)
         print(f'Worker {slot}: {name} {start + len(page["rows"])}/{page["total"]}', flush=True)
         time.sleep(.25)
@@ -132,12 +130,37 @@ def assemble(folder, verify_live=True):
         if actual != expected or len(actual) != len(output['pages']):
             raise ValueError(f'Worker {slot} has incomplete or duplicate pages')
         pages.update({(page['name'], page['start']): page for page in output['pages']})
-    files = {}
-    for name, total in manifest['totals'].items():
+    files, totals = {}, {}
+    for name, planned_total in manifest['totals'].items():
+        total = planned_total
+        if verify_live:
+            fresh = fetch(name, 0)
+            if fresh['rows'] != manifest['first'][name]['rows']:
+                raise ValueError(f'{name}: leading positions changed during collection; live files unchanged')
+            # Steam reports slightly different totals on adjacent pages. The actual
+            # short final page is authoritative; never use a fixed catalog ceiling.
+            tail = ((fresh['total'] - 1) // PAGE_SIZE) * PAGE_SIZE
+            deadline = time.monotonic() + 300
+            while True:
+                if time.monotonic() > deadline:
+                    raise ValueError('Steam list end did not settle; live files unchanged')
+                end_page = fetch(name, tail)
+                pages[(name, tail)] = end_page
+                if not end_page['rows'] and tail > end_page['total']:
+                    tail = ((end_page['total'] - 1) // PAGE_SIZE) * PAGE_SIZE
+                    continue
+                if len(end_page['rows']) < PAGE_SIZE:
+                    total = tail + len(end_page['rows'])
+                    break
+                tail += PAGE_SIZE
+        totals[name] = total
         ranks, identities = {}, set()
         for offset in range(0, total, PAGE_SIZE):
-            page = pages[(name, offset)]
-            if page['total'] != total or len(page['rows']) != min(PAGE_SIZE, total - offset):
+            page = pages.get((name, offset))
+            expected = min(PAGE_SIZE, total - offset)
+            if verify_live and (page is None or len(page['rows']) != expected):
+                page = fetch(name, offset)
+            if page is None or len(page['rows']) != expected:
                 raise ValueError('Incomplete page in staging')
             for index, row in enumerate(page['rows'], offset + 1):
                 if row['key'] in identities or row['appid'] is not None and row['appid'] in ranks:
@@ -145,15 +168,11 @@ def assemble(folder, verify_live=True):
                 identities.add(row['key'])
                 if row['appid'] is not None:
                     ranks[row['appid']] = index
-        if verify_live:
-            fresh = fetch(name, 0)
-            if fresh != manifest['first'][name]:
-                raise ValueError(f'{name}: leading page changed during collection; live files unchanged')
         files[name] = ranks
         save(folder / (name + '.json'), ranks)
     return dict(schema=1, run_id=manifest['run_id'], attempt=manifest['attempt'],
                 started=manifest['started'], finished=int(time.time()), region=manifest['region'],
-                totals=manifest['totals'], files=files)
+                totals=totals, files=files)
 
 
 def publish(folder):
