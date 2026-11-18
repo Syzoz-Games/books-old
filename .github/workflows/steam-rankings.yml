@@ -1,9 +1,5 @@
 name: Steam popularity rankings
 on:
-  workflow_run:
-    workflows: ["Google Play ratings and install history"]
-    branches: [main]
-    types: [completed]
   workflow_dispatch:
 permissions:
   contents: read
@@ -12,7 +8,6 @@ concurrency:
   cancel-in-progress: false
 jobs:
   plan:
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
