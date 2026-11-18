@@ -2,6 +2,8 @@
 import concurrent.futures
 import datetime as dt
 import gzip
+from http.client import IncompleteRead
+import zlib
 from email.utils import parsedate_to_datetime
 import html
 import json
@@ -25,6 +27,9 @@ DATA = re.compile(r"AF_initDataCallback\(\{key:\s*'ds:5',\s*hash:[^,]*,\s*data:\
 
 
 TRANSIENT_HTTP = (408, 429, 500, 502, 503, 504)
+# A successful HTTP response can still contain an interrupted/corrupt body.
+READ_ERRORS = (TimeoutError, URLError, ConnectionError, IncompleteRead,
+               EOFError, gzip.BadGzipFile, zlib.error, expat.ExpatError)
 
 
 def retry_delay(error):
@@ -51,9 +56,10 @@ def get(url, parser, missing_ok=False):
             if missing_ok and delay > 30:
                 raise
             time.sleep(delay or 2 ** (attempt + 1))
-        except (TimeoutError, URLError, ConnectionError):
+        except READ_ERRORS as err:
             if attempt == 3:
                 raise
+            print(f"Retrying download {attempt + 1}/3: {type(err).__name__}: {url}", flush=True)
             time.sleep(2 ** (attempt + 1))
 
 
@@ -201,7 +207,7 @@ def process_batch(pool, post, packages_to_check, file, retry=False):
                         raise
                     delays[pkg] = max(300, retry_delay(error))
                     print(f"Deferring {pkg}: HTTP {error.code}", flush=True)
-                except (TimeoutError, URLError, ConnectionError) as error:
+                except READ_ERRORS as error:
                     delays[pkg] = 300
                     print(f"Deferring {pkg}: {type(error).__name__}", flush=True)
                 else:
