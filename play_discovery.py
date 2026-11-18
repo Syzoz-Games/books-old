@@ -2,6 +2,7 @@
 import concurrent.futures
 import datetime as dt
 import gzip
+import hashlib
 from http.client import IncompleteRead
 import zlib
 from email.utils import parsedate_to_datetime
@@ -13,7 +14,7 @@ import time
 import uuid
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 from xml.parsers import expat
 import xml.etree.ElementTree as ET
 
@@ -109,6 +110,35 @@ def packages(response):
     with gzip.GzipFile(fileobj=response) as stream:
         parser.ParseFile(stream)
     return sorted(ids)
+
+
+def sitemap(url, previous=None, now=None):
+    """Validate saved files cheaply; force a full content check at least weekly."""
+    previous = previous or {}
+    now = int(time.time()) if now is None else now
+    headers = {}
+    if previous.get("packages_sha256") and 0 <= now - previous.get("verified_at", 0) < 7 * 86400:
+        if previous.get("etag"):
+            headers["If-None-Match"] = previous["etag"]
+        elif previous.get("last_modified"):
+            headers["If-Modified-Since"] = previous["last_modified"]
+
+    def read(response):
+        ids = packages(response)
+        state = dict(etag=response.headers.get("ETag"),
+                     last_modified=response.headers.get("Last-Modified"),
+                     packages_sha256=hashlib.sha256("\n".join(ids).encode()).hexdigest(),
+                     verified_at=now)
+        # A changed HTTP timestamp does not necessarily mean package IDs changed.
+        return (None if state["packages_sha256"] == previous.get("packages_sha256") else ids), state
+
+    try:
+        return get(Request(url, headers=headers), read)
+    except HTTPError as error:
+        if error.code != 304 or not headers:
+            raise
+        error.close()
+        return None, previous
 
 
 def field(value, *path):
@@ -243,11 +273,15 @@ def collect(slot):
         return
     context["generation"]=first["generation"]
     tag,total=manifest()
-    opened=post("open",tag=tag,total=total)
+    opened=post("open",tag=tag,total=total,protocol=2)
     if opened["status"]!="ready":
         return
     tag,total=opened["snapshot"]["tag"],opened["snapshot"]["total"]
+    context["pass_id"] = opened["snapshot"]["pass_id"]
     index=opened["next"]
+    previous=opened.get("file_state")
+    print(f"Sitemap verification pass {context['pass_id']}: snapshot {tag}, "
+          f"worker {slot} resumes at {index}/{total}", flush=True)
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
         context["tag"] = tag
         while time.monotonic() < http.deadline-180:
@@ -261,14 +295,15 @@ def collect(slot):
                 if retries["packages"]:
                     continue
                 return
-            ids = get(BASE+f"play_sitemaps_{tag}-{index:05}-of-{total}.xml.gz", packages)
-            for offset in range(0, len(ids), 40):
+            ids, state = sitemap(BASE+f"play_sitemaps_{tag}-{index:05}-of-{total}.xml.gz", previous)
+            for offset in range(0, len(ids or []), 40):
                 if not process_batch(pool, post, ids[offset:offset+40], index):
                     return
-            done = post("done", file=index)
+            done = post("done", file=index, file_state=state)
             if done["status"] != "done":
                 return
             index = done["next"]
+            previous = done.get("file_state")
 
 
 if __name__=="__main__":
