@@ -1,0 +1,64 @@
+name: Discovery connection diagnostic
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    name: Status probe ${{ matrix.slot }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    strategy:
+      fail-fast: false
+      max-parallel: 60
+      matrix:
+        slot: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Inspect authenticated status response only
+        env:
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
+          SLOT: ${{ matrix.slot }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, html, json, os, re, time, uuid
+          from urllib.request import Request, build_opener
+          from urllib.error import HTTPError, URLError
+          from apkpure.admin_mobile import METADATA, NoRedirect, catalog_credential, compact
+          slot=int(os.environ['SLOT'])
+          token=catalog_credential(os.environ['STEAM_SYNC_TOKEN'])
+          payload=dict(scope='play_discovery', action='status', slot=slot, workers=60,
+                       run_id=os.environ['GITHUB_RUN_ID']+'-'+os.environ['GITHUB_RUN_ATTEMPT'],
+                       claim_id=uuid.uuid4().hex)
+          body=compact(payload)
+          headers={'User-Agent':'SyzozCatalogAdmin/1.0 (+https://syzoz.com/game-explorer/)',
+                   'Accept-Encoding':'identity','Content-Type':'application/json','X-Catalog-Token':token}
+          time.sleep(slot*.25)
+          for attempt in range(2):
+              try:
+                  try:
+                      response=build_opener(NoRedirect()).open(Request(METADATA,body,headers),timeout=20)
+                  except HTTPError as error:
+                      response=error
+                  with response:
+                      raw=response.read(1000001)
+                      report=dict(slot=slot,attempt=attempt+1,http=response.status,
+                                  content_type=response.headers.get('Content-Type'),server=response.headers.get('Server'),
+                                  bytes=len(raw),body_sha256=hashlib.sha256(raw).hexdigest())
+                  try:
+                      value=json.loads(raw)
+                      report['json']=True
+                      report['status']=value.get('status') if isinstance(value,dict) else 'non-object'
+                  except ValueError:
+                      report['json']=False
+                      lower=raw.lower()
+                      report['markers']=[s for s in ['imunify360','openresty','one moment, please','cf-chl-','fatal error','warning:'] if s.encode() in lower]
+                      title=re.search(br'<title[^>]*>(.*?)</title>',raw,re.I|re.S)
+                      report['html_title']=html.unescape(title[1].decode('utf-8','replace'))[:120] if title else None
+                  print(json.dumps(report),flush=True)
+              except (URLError,TimeoutError,OSError) as error:
+                  print(json.dumps(dict(slot=slot,attempt=attempt+1,transport_error=type(error).__name__)),flush=True)
+              if attempt==0: time.sleep(3)
+          PY
