@@ -23,42 +23,23 @@ jobs:
           SLOT: ${{ matrix.slot }}
         run: |
           python3 - <<'PY'
-          import hashlib, html, json, os, re, time, uuid
-          from urllib.request import Request, build_opener
-          from urllib.error import HTTPError, URLError
-          from apkpure.admin_mobile import METADATA, NoRedirect, catalog_credential, compact
+          import json, os, time, uuid
+          from apkpure.admin_mobile import Http, METADATA, WebsiteChallenge, catalog_credential
           slot=int(os.environ['SLOT'])
-          token=catalog_credential(os.environ['STEAM_SYNC_TOKEN'])
           payload=dict(scope='play_discovery', action='status', slot=slot, workers=60,
                        run_id=os.environ['GITHUB_RUN_ID']+'-'+os.environ['GITHUB_RUN_ATTEMPT'],
                        claim_id=uuid.uuid4().hex)
-          body=compact(payload)
-          headers={'User-Agent':'SyzozCatalogAdmin/1.0 (+https://syzoz.com/game-explorer/)',
-                   'Accept-Encoding':'identity','Content-Type':'application/json','X-Catalog-Token':token}
+          token=catalog_credential(os.environ['STEAM_SYNC_TOKEN'])
           time.sleep(slot*.25)
-          for attempt in range(2):
-              try:
-                  try:
-                      response=build_opener(NoRedirect()).open(Request(METADATA,body,headers),timeout=20)
-                  except HTTPError as error:
-                      response=error
-                  with response:
-                      raw=response.read(1000001)
-                      report=dict(slot=slot,attempt=attempt+1,http=response.status,
-                                  content_type=response.headers.get('Content-Type'),server=response.headers.get('Server'),
-                                  bytes=len(raw),body_sha256=hashlib.sha256(raw).hexdigest())
-                  try:
-                      value=json.loads(raw)
-                      report['json']=True
-                      report['status']=value.get('status') if isinstance(value,dict) else 'non-object'
-                  except ValueError:
-                      report['json']=False
-                      lower=raw.lower()
-                      report['markers']=[s for s in ['imunify360','openresty','one moment, please','cf-chl-','fatal error','warning:'] if s.encode() in lower]
-                      title=re.search(br'<title[^>]*>(.*?)</title>',raw,re.I|re.S)
-                      report['html_title']=html.unescape(title[1].decode('utf-8','replace'))[:120] if title else None
-                  print(json.dumps(report),flush=True)
-              except (URLError,TimeoutError,OSError) as error:
-                  print(json.dumps(dict(slot=slot,attempt=attempt+1,transport_error=type(error).__name__)),flush=True)
-              if attempt==0: time.sleep(3)
+          http=Http(90)
+          started=time.monotonic()
+          try:
+              result=http.website(METADATA,payload,token,metadata=True,timeout=20,attempts=8)
+              outcome='ready' if result.get('status')=='ready' else result.get('status','unexpected')
+          except WebsiteChallenge as error:
+              outcome='challenge_budget_exhausted'
+              print('::warning::'+str(error),flush=True)
+          print(json.dumps(dict(slot=slot,outcome=outcome,
+                                challenge_retries=http.local.challenge_retries,
+                                elapsed=round(time.monotonic()-started,2))),flush=True)
           PY
