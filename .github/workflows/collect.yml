@@ -1,8 +1,6 @@
 name: Collect Steam catalog
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '11 * * * *'
 permissions:
   contents: read
 concurrency:
