@@ -231,11 +231,11 @@ def collect(slot):
     token = catalog_credential(os.environ["STEAM_SYNC_TOKEN"])
     run = os.environ["GITHUB_RUN_ID"]+"-"+os.environ["GITHUB_RUN_ATTEMPT"]
     http = Http(5*3600+40*60)
-    context = dict(scope="play_discovery",slot=slot,run_id=run)
+    context = dict(scope="play_discovery",slot=slot,workers=60,run_id=run)
     def post(action, **fields):
         payload=dict(context,action=action,claim_id=uuid.uuid4().hex,**fields)
         return http.website(METADATA,payload,token,metadata=True,timeout=45,attempts=8)
-    # Spread startup requests across the shared host instead of sending 40 at once.
+    # Spread startup requests across the shared host instead of sending 60 at once.
     time.sleep(slot * 0.25)
     first=post("status")
     if first["status"]!="ready":
