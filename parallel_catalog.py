@@ -98,12 +98,23 @@ def mobile_finish(m,args,plan):
 
 def steam_transport(m):return m.Transport(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/game-explorer/steam-sync.php'),credential('steam',m))
 
+def steam_deferred(error, **fields):
+ print(f'::warning::{error}. Skipping unavailable work; unconfirmed pages remain at their saved server checkpoints for a later sync.',flush=True)
+ return dict(fields,deferred=True,retry_pending=True)
+
 def steam_plan(m,args,run):
  _,_,_,total,_=m.store_catalog_page(0,time.monotonic()+90,count=1,select_ids=lambda ids:[])
- reply=steam_transport(m).call('parallel-begin',run_id=run,workers=60,total=total,query_sort=2,listing_protocol=1)
- return {'schema':1,'provider':'steam','workers':60,'query_sort':2,'listing_protocol':1,'run_id':run,'total':reply['total'],'offsets':reply['offsets'],'generation':reply['generation']}
+ plan={'schema':1,'provider':'steam','workers':60,'query_sort':2,'listing_protocol':1,'run_id':run}
+ try:reply=steam_transport(m).call('parallel-begin',run_id=run,workers=60,total=total,query_sort=2,listing_protocol=1)
+ except m.CheckpointUnavailable as error:return steam_deferred(error,**plan)
+ return dict(plan,total=reply['total'],offsets=reply['offsets'],generation=reply['generation'])
 
 def steam_work(m,args,plan):
+ if plan.get('deferred'):return steam_deferred('Shared Steam plan unavailable',worker=args.worker)
+ try:return steam_work_pages(m,args,plan)
+ except m.CheckpointUnavailable as error:return steam_deferred(error,worker=args.worker)
+
+def steam_work_pages(m,args,plan):
  tr=steam_transport(m);deadline=time.monotonic()+args.seconds
  session=uuid.uuid4().hex;receipt=tr.call('parallel-worker',run_id=plan['run_id'],worker=args.worker,generation=plan['generation'],session=session);offset=receipt['next_offset']
  while offset<plan['total'] and deadline-time.monotonic()>60:
@@ -115,6 +126,7 @@ def steam_work(m,args,plan):
    return needed
   for attempt in range(3):
    try:records,details,_,_,_,listings=m.store_catalog_page(offset,deadline,include_listings=True,select_ids=select_ids);break
+   except m.CheckpointUnavailable:raise
    except (OSError,ValueError,RuntimeError):
     if attempt==2:raise
     time.sleep(attempt+1)
@@ -132,6 +144,11 @@ def steam_work(m,args,plan):
  return {'worker':args.worker,'next_offset':offset,'checkpointed':True}
 
 def steam_finish(m,args,plan):
+ if plan.get('deferred'):return steam_deferred('Shared Steam plan unavailable')
+ try:return steam_finish_saved(m,args,plan)
+ except m.CheckpointUnavailable as error:return steam_deferred(error)
+
+def steam_finish_saved(m,args,plan):
  tr=steam_transport(m)
  reply=tr.call('parallel-finish',run_id=plan['run_id'],generation=plan['generation'])
  if args.owners_seconds:
