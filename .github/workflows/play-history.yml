@@ -1,9 +1,5 @@
 name: Google Play ratings and install history
 on:
-  workflow_run:
-    workflows: ["Google Play game discovery"]
-    branches: [main]
-    types: [completed]
   workflow_dispatch:
     inputs:
       mode:
@@ -18,10 +14,6 @@ concurrency:
   cancel-in-progress: false
 jobs:
   observe:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
     name: Play worker ${{ matrix.slot }}
     runs-on: ubuntu-24.04
     timeout-minutes: 355
