@@ -9,7 +9,7 @@ from apkpure.admin_mobile import Http, METADATA, SyncError, catalog_credential, 
 
 
 class CheckpointPending(Exception):
-    """The runner budget ended; the host still owns the unfinished batch."""
+    """The retry budget ended; the host still owns the unfinished batch."""
 
 
 def retryable(error):
@@ -22,6 +22,7 @@ def retryable(error):
 
 def post_checkpoint(http, credential, request, deadline):
     # Keep the exact claim/payload for retries, including a lost submit receipt.
+    deadline = min(deadline, time.monotonic() + 120)
     attempt = 0
     while time.monotonic() < deadline - 2:
         try:
