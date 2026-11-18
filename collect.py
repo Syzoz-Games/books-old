@@ -1,5 +1,6 @@
 """Anonymous Steam collector. Website owns durable checkpoints; no empty-gap stop."""
 import http.client
+import random
 import argparse,base64,gzip,json,os,re,time,unicodedata,urllib.request,urllib.error,urllib.parse
 from pathlib import Path
 from contextlib import nullcontext
@@ -9,6 +10,7 @@ from steam.enums import EResult
 from gevent import Timeout
 MAX_APP_ID=2**32-1
 class BatchDataError(ValueError):pass
+class CheckpointUnavailable(RuntimeError):pass
 class NoRedirect(urllib.request.HTTPRedirectHandler):
  def redirect_request(self,*args,**kw):return None
 class Transport:
@@ -22,16 +24,34 @@ class Transport:
     with (self.local/'batches.jsonl').open('a') as f:f.write(json.dumps(data)+'\n')
    state=kw.get('state',old);temp=p.with_suffix('.tmp');temp.write_text(json.dumps(state));temp.replace(p);return state
   req=urllib.request.Request(self.url,wire_json(data),{'Content-Type':'application/json','X-Steam-Token':self.token})
-  for attempt in range(3):
+  deadline=time.monotonic()+60;attempt=0;reason='No response'
+  while True:
+   remaining=deadline-time.monotonic()
+   if remaining<=0:raise CheckpointUnavailable(f'Catalog checkpoint {action} deferred after one minute: {reason}')
+   attempt+=1
    try:
-    with urllib.request.build_opener(NoRedirect).open(req,timeout=90) as r:return json.load(r)
+    with urllib.request.build_opener(NoRedirect).open(req,timeout=min(25,remaining)) as r:
+     raw=r.read();kind=r.headers.get('Content-Type','').split(';',1)[0].lower()
+    try:reply=json.loads(raw)
+    except (ValueError,UnicodeError):
+     reason=f'HTTP 200 returned {kind or "unknown content type"}, {len(raw)} bytes instead of JSON'
+    else:
+     if not isinstance(reply,dict):raise RuntimeError('Catalog checkpoint response must be a JSON object')
+     if 'error' in reply:raise RuntimeError('Catalog checkpoint returned an application error')
+     return reply
    except urllib.error.HTTPError as e:
-    if action=='batch' and e.code in (400,413,422):raise BatchDataError('Batch rejected: HTTP '+str(e.code)) from None
-    if e.code<500:raise RuntimeError('Catalog checkpoint rejected: HTTP '+str(e.code)) from None
-    if attempt==2:raise
-   except OSError:
-    if attempt==2:raise
-   time.sleep(2*(attempt+1))
+    e.close()
+    if action in ('batch','parallel-batch') and e.code in (400,413,422):raise BatchDataError('Batch rejected: HTTP '+str(e.code)) from None
+    if e.code not in (408,425,429) and e.code<500:raise RuntimeError('Catalog checkpoint rejected: HTTP '+str(e.code)) from None
+    reason='HTTP '+str(e.code)
+   except (OSError,http.client.HTTPException) as e:
+    reason=type(e).__name__
+   remaining=deadline-time.monotonic()
+   if remaining<=0:raise CheckpointUnavailable(f'Catalog checkpoint {action} deferred after one minute: {reason}')
+   # Retry the exact request/session/chunk, so a lost reply cannot skip data.
+   if attempt==1:print(f'::warning::Catalog checkpoint {action}: {reason}; retrying for at most one minute.',flush=True)
+   time.sleep(min(remaining,min(12,2**min(attempt,4))+random.uniform(0,1)))
+
 def wire_json(value):
  return json.dumps(value,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode('utf-8')
 def send_catalog_batch(tr,previous,state,records,details,audit,max_body=5500000,max_details=4000000,max_detail=2000000):
@@ -570,6 +590,8 @@ def main():
   if owner_remaining:
    summary=owner_phase(tr,state,min(started+args.seconds,time.monotonic()+owner_remaining),args.engine_seconds/2);print(json.dumps(dict(phase='owners',**summary)),flush=True)
   state.update(status='checkpointed',phase='Waiting for next run',heartbeat=int(time.time()));tr.call('finish',state=state)
+ except CheckpointUnavailable:
+  raise
  except BaseException as e:
   error=e;state.update(status='failed',last_error=type(e).__name__+': '+str(e),heartbeat=int(time.time()));
   try:tr.call('finish',state=state)
@@ -577,4 +599,7 @@ def main():
  finally:
   if client is not None:client.logout()
  if error:raise error
-if __name__=='__main__':main()
+if __name__=='__main__':
+ try:main()
+ except CheckpointUnavailable as error:
+  print(f'::warning::{error}. Skipping unavailable work; saved checkpoints remain pending for a later sync.',flush=True)
