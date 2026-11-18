@@ -1,0 +1,52 @@
+name: Diagnose Steam host responses
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    name: Response probe ${{ matrix.slot }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        slot: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    steps:
+      - name: Read checkpoint response without starting collection
+        env:
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
+          PROBE_SLOT: ${{ matrix.slot }}
+        shell: python
+        run: |
+          import os,json,time,urllib.request,urllib.error,hashlib,socket,re
+          token=os.environ['STEAM_SYNC_TOKEN']
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,*args,**kwargs): return None
+          print(json.dumps({'slot':os.environ['PROBE_SLOT'],'dns':sorted({a[4][0] for a in socket.getaddrinfo('syzoz.com',443,type=socket.SOCK_STREAM)})}),flush=True)
+          for attempt in range(3):
+              request=urllib.request.Request('https://syzoz.com/game-explorer/steam-sync.php',b'{"action":"state"}',{'Content-Type':'application/json','X-Steam-Token':token,'User-Agent':'Python-urllib/3.12'})
+              started=time.monotonic()
+              try:
+                  try: response=urllib.request.build_opener(NoRedirect).open(request,timeout=30)
+                  except urllib.error.HTTPError as error: response=error
+                  with response:
+                      raw=response.read(200000)
+                      status=response.status
+                      headers={k:v for k,v in response.headers.items() if k.lower() in ('content-type','content-length','content-encoding','server','location','retry-after','cf-ray','cf-mitigated','x-litespeed-cache','via')}
+                  result={'attempt':attempt+1,'status':status,'headers':headers,'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest(),'seconds':round(time.monotonic()-started,3)}
+                  try:
+                      data=json.loads(raw)
+                      result.update(valid_json=True,json_type=type(data).__name__)
+                      if isinstance(data,dict): result['error']=data.get('error')
+                  except (ValueError,UnicodeError):
+                      result['valid_json']=False
+                      body=raw.decode(errors='replace').replace(token,'[REDACTED]')
+                      result['body_preview']=body[:5000]
+                      result['html_title']=re.findall(r'<title[^>]*>(.*?)</title>',body,re.I|re.S)[:1]
+                      result['body_suffix']=body[-1200:] if len(body)>5000 else ''
+                  print(json.dumps(result),flush=True)
+              except Exception as error:
+                  print(json.dumps({'attempt':attempt+1,'exception':type(error).__name__,'message':str(error).replace(token,'[REDACTED]')}),flush=True)
+              if attempt<2: time.sleep(2)
