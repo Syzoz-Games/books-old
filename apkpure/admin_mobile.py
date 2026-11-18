@@ -31,6 +31,14 @@ class SyncError(RuntimeError):
         super().__init__(reason)
         self.source, self.status, self.challenge = source, status, challenge
 
+class WebsiteChallenge(SyncError):
+    """The host still returned a browser challenge after the retry budget."""
+
+def is_website_challenge(raw):
+    # Inspect the response we already received; a separate preflight request
+    # cannot guarantee that the following authenticated request will succeed.
+    return bool(re.search(br'<title[^>]*>\s*One moment,\s*please\s*\.{0,3}\s*</title>', raw, re.I))
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
@@ -94,12 +102,20 @@ class Http:
 
     def website(self, url, payload, credential, metadata=False, timeout=45, attempts=3):
         raw_request = compact(payload)
-        for attempt in range(attempts):
+        retry_until = min(self.deadline, time.monotonic() + 60)
+        attempt = 0
+        self.local.challenge_retries = 0
+        while True:
             try:
-                raw = self.request(url, 'website', payload, credential, maximum=1_000_000, timeout=timeout)
+                remaining = retry_until - time.monotonic()
+                if remaining <= 0:
+                    raise SyncError('Website request retry budget reached', 'website')
+                raw = self.request(url, 'website', raw_request, credential, maximum=1_000_000, timeout=min(timeout, remaining))
                 try:
                     result = json.loads(raw)
                 except ValueError:
+                    if is_website_challenge(raw):
+                        raise WebsiteChallenge('Host returned the One moment, please browser challenge', 'website', challenge=True) from None
                     raise SyncError('Website returned invalid JSON', 'website') from None
                 if not isinstance(result, dict) or result.get('error'):
                     raise SyncError('Website rejected this checkpoint', 'website')
@@ -107,11 +123,20 @@ class Http:
                     raise SyncError('Metadata receipt identity or checksum mismatch', 'website')
                 return result
             except SyncError as error:
-                if error.status is not None and error.status < 500 or attempt == attempts - 1:
+                if error.challenge:
+                    remaining = retry_until - time.monotonic()
+                    if remaining <= 3:
+                        raise WebsiteChallenge('Host browser challenge persisted for the one-minute request budget; checkpoint retained', 'website', error.status, True) from None
+                    self.local.challenge_retries += 1
+                    print(f'Host browser challenge: waiting 3 seconds before retry {self.local.challenge_retries}', flush=True)
+                    time.sleep(3)
+                    continue
+                if error.status is not None and error.status < 500 or attempt >= attempts - 1:
                     raise
-                if self.deadline - time.monotonic() <= attempt + 2:
+                if retry_until - time.monotonic() <= attempt + 2:
                     raise
                 time.sleep(attempt + 1)
+                attempt += 1
 
 def xml_document(raw, root_name):
     if not isinstance(raw, bytes) or re.search(br'<!DOCTYPE|<!ENTITY', raw, re.I):
