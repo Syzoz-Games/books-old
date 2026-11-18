@@ -1,7 +1,6 @@
 name: Google Play game discovery
 on:
-  schedule:
-    - cron: '35 0 * * *'
+  # Daily dispatch is owned by the host scheduler at 00:35 UTC.
   workflow_dispatch:
 permissions:
   contents: read
@@ -27,3 +26,4 @@ jobs:
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
           SLOT: ${{ matrix.slot }}
         run: python3 play_discovery.py
+
