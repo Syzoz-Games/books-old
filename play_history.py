@@ -103,7 +103,7 @@ def collect(slot, smoke):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--slot", required=True, type=int, choices=range(40))
+    parser.add_argument("--slot", required=True, type=int, choices=range(60))
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
     collect(args.slot, args.smoke)

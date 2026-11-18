@@ -1,10 +1,10 @@
-"""Ten cooperating catalog jobs. Plans contain no credentials; the server owns progress."""
+"""Sixty cooperating catalog jobs. Plans contain no credentials; the server owns progress."""
 import argparse,importlib,json,os,re,time,uuid
 from pathlib import Path
 
 def load_plan(path, provider):
  p=json.loads(Path(path).read_text())
- if p.get('schema')!=1 or p.get('provider')!=provider or provider=='steam' and (p.get('query_sort')!=2 or p.get('listing_protocol')!=1) or p.get('workers')!=(20 if provider=='mobile' and p.get('mode')=='release_dates' else 10) or not re.fullmatch(r'[0-9]+-[0-9]+',str(p.get('run_id',''))):raise ValueError('Invalid shared catalog plan')
+ if p.get('schema')!=1 or p.get('provider')!=provider or provider=='steam' and (p.get('query_sort')!=2 or p.get('listing_protocol')!=1) or p.get('workers')!=60 or not re.fullmatch(r'[0-9]+-[0-9]+',str(p.get('run_id',''))):raise ValueError('Invalid shared catalog plan')
  return p
 
 def credential(provider, module):
@@ -14,7 +14,7 @@ def credential(provider, module):
 
 def mobile_plan(m, args, run):
  token=credential('mobile',m);http=m.Http(args.seconds)
- plan={'schema':1,'provider':'mobile','workers':20 if args.mode=='release_dates' else 10,'run_id':run,'mode':args.mode,'pending':[]}
+ plan={'schema':1,'provider':'mobile','workers':60,'run_id':run,'mode':args.mode,'pending':[]}
  if args.mode in ('all','release_dates'):
   http.website(m.METADATA,{'scope':'release_dates','action':'seed','run_id':run,'claim_id':run+'-seed'},token,timeout=120)
  if args.mode not in ('metadata','release_dates'):
@@ -100,8 +100,8 @@ def steam_transport(m):return m.Transport(os.environ.get('STEAM_SYNC_URL','https
 
 def steam_plan(m,args,run):
  _,_,_,total,_=m.store_catalog_page(0,time.monotonic()+90,count=1,select_ids=lambda ids:[])
- reply=steam_transport(m).call('parallel-begin',run_id=run,workers=10,total=total,query_sort=2,listing_protocol=1)
- return {'schema':1,'provider':'steam','workers':10,'query_sort':2,'listing_protocol':1,'run_id':run,'total':reply['total'],'offsets':reply['offsets'],'generation':reply['generation']}
+ reply=steam_transport(m).call('parallel-begin',run_id=run,workers=60,total=total,query_sort=2,listing_protocol=1)
+ return {'schema':1,'provider':'steam','workers':60,'query_sort':2,'listing_protocol':1,'run_id':run,'total':reply['total'],'offsets':reply['offsets'],'generation':reply['generation']}
 
 def steam_work(m,args,plan):
  tr=steam_transport(m);deadline=time.monotonic()+args.seconds
@@ -146,7 +146,7 @@ def main():
  parser.add_argument('--seconds',type=int,default=21600);parser.add_argument('--mode',choices=['all','sitemaps','metadata','release_dates'],default='all')
  parser.add_argument('--metadata-batches',type=int,default=20);parser.add_argument('--owners-seconds',type=int,default=300);parser.add_argument('--engine-seconds',type=int,default=60)
  args=parser.parse_args()
- if not 60<=args.seconds<=21600 or not 0<=args.worker<20 or not 0<=args.metadata_batches<=200 or not 0<=args.owners_seconds<=600 or not 0<=args.engine_seconds<=120:raise ValueError('Invalid worker bounds')
+ if not 60<=args.seconds<=21600 or not 0<=args.worker<60 or not 0<=args.metadata_batches<=200 or not 0<=args.owners_seconds<=600 or not 0<=args.engine_seconds<=120:raise ValueError('Invalid worker bounds')
  module=importlib.import_module('apkpure.admin_mobile' if args.provider=='mobile' else 'collect')
  if args.stage=='plan':
   run=os.environ.get('GITHUB_RUN_ID','')+'-'+os.environ.get('GITHUB_RUN_ATTEMPT','1')
