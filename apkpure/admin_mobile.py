@@ -102,7 +102,7 @@ class Http:
 
     def website(self, url, payload, credential, metadata=False, timeout=45, attempts=3):
         raw_request = compact(payload)
-        retry_until = min(self.deadline, time.monotonic() + 60)
+        retry_until = min(self.deadline, time.monotonic() + 120)
         attempt = 0
         self.local.challenge_retries = 0
         while True:
@@ -126,7 +126,7 @@ class Http:
                 if error.challenge:
                     remaining = retry_until - time.monotonic()
                     if remaining <= 3:
-                        raise WebsiteChallenge('Host browser challenge persisted for the one-minute request budget; checkpoint retained', 'website', error.status, True) from None
+                        raise WebsiteChallenge('Host browser challenge persisted for the two-minute request budget; checkpoint retained', 'website', error.status, True) from None
                     self.local.challenge_retries += 1
                     print(f'Host browser challenge: waiting 3 seconds before retry {self.local.challenge_retries}', flush=True)
                     time.sleep(3)
