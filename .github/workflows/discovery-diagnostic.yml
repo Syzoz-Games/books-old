@@ -7,7 +7,7 @@ jobs:
   probe:
     name: Status probe ${{ matrix.slot }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 4
     strategy:
       fail-fast: false
       max-parallel: 60
@@ -31,7 +31,7 @@ jobs:
                        claim_id=uuid.uuid4().hex)
           token=catalog_credential(os.environ['STEAM_SYNC_TOKEN'])
           time.sleep(slot*.25)
-          http=Http(90)
+          http=Http(150)
           started=time.monotonic()
           try:
               result=http.website(METADATA,payload,token,metadata=True,timeout=20,attempts=8)
