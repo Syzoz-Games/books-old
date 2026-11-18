@@ -21,7 +21,7 @@ SOURCES = {
     'popularetopsellerfile': {'filter': 'globaltopsellers'},
 }
 PAGE_SIZE = 100
-WORKERS = 20
+WORKERS = 60
 ENDPOINT = 'https://store.steampowered.com/search/results/'
 UPLOAD = 'https://syzoz.com/game-explorer/steam-rankings-sync.php'
 
