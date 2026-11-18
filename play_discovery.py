@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 from xml.parsers import expat
 import xml.etree.ElementTree as ET
 
-from apkpure.admin_mobile import Http, METADATA, catalog_credential
+from apkpure.admin_mobile import Http, METADATA, WebsiteChallenge, catalog_credential
 
 BASE = "https://play.google.com/sitemaps/"
 NAME = re.compile(r"play_sitemaps_(\d{4}-\d{2}-\d{2}_\d{8,12})-(\d+)-of-(\d+)\.xml\.gz")
@@ -307,4 +307,7 @@ def collect(slot):
 
 
 if __name__=="__main__":
-    collect(int(os.environ["SLOT"]))
+    try:
+        collect(int(os.environ["SLOT"]))
+    except WebsiteChallenge as error:
+        print(f"::warning::Discovery worker {os.environ['SLOT']}: {error}. Saved work remains pending for the next normal run.", flush=True)
