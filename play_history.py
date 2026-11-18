@@ -22,7 +22,7 @@ def retryable(error):
 
 def post_checkpoint(http, credential, request, deadline):
     # Keep the exact claim/payload for retries, including a lost submit receipt.
-    deadline = min(deadline, time.monotonic() + 120)
+    deadline = min(deadline, time.monotonic() + 60)
     attempt = 0
     while time.monotonic() < deadline - 2:
         try:
