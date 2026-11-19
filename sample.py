@@ -173,7 +173,7 @@ def upload_sample(payload, sources, url, token):
         raise SampleError('Upload provenance does not match the current GitHub run')
     parsed = urllib.parse.urlsplit(url)
     if (parsed.scheme != 'https' or parsed.netloc != 'syzoz.com'
-            or parsed.path != '/game-explorer/steam-sync.php' or parsed.query or parsed.fragment):
+            or parsed.path != '/chart/steam-sync.php' or parsed.query or parsed.fragment):
         raise SampleError('Unexpected sample receiver URL')
     if len(token) < 32 or '\r' in token or '\n' in token:
         raise SampleError('Steam upload credential is missing or invalid')
@@ -214,7 +214,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--appids', nargs='+', required=True, type=int)
     parser.add_argument('--seconds', type=int, default=240)
-    parser.add_argument('--url', default=os.environ.get('STEAM_SYNC_URL', 'https://syzoz.com/game-explorer/steam-sync.php'))
+    parser.add_argument('--url', default=os.environ.get('STEAM_SYNC_URL', 'https://syzoz.com/chart/steam-sync.php'))
     parser.add_argument('--output', type=Path, default=Path('sample-payload.json'))
     parser.add_argument('--result', type=Path, default=Path('sample-result.json'))
     parser.add_argument('--dry-run', action='store_true', help='Build fresh GitHub artifacts without uploading')
