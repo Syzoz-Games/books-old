@@ -21,8 +21,8 @@ NS = 'http://www.sitemaps.org/schemas/sitemap/0.9'
 INDEX = 'https://apkpure.net/sitemap.xml'
 GAME = re.compile(r'https://apkpure\.net/apkpure-net-sitemaps/game_[a-z_]+(?:-\d+)?\.xml\Z')
 PACKAGE = re.compile(r'[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+\Z')
-MIRROR = 'https://syzoz.com/game-explorer/mirror.php'
-METADATA = 'https://syzoz.com/game-explorer/metadata-sync.php'
+MIRROR = 'https://syzoz.com/chart/mirror.php'
+METADATA = 'https://syzoz.com/chart/metadata-sync.php'
 DETAILS = 'https://tapi.pureapk.com/v3/batch_get_app_detail'
 MAX_UPLOAD = 5_500_000
 
@@ -63,7 +63,7 @@ class Http:
         body = None if payload is None else payload if isinstance(payload, bytes) else compact(payload)
         if body is not None and source == 'website' and len(body) > MAX_UPLOAD:
             raise SyncError('Upload exceeds the bounded website payload limit', source)
-        request_headers = {'User-Agent': 'SyzozCatalogAdmin/1.0 (+https://syzoz.com/game-explorer/)', 'Accept-Encoding': 'identity'}
+        request_headers = {'User-Agent': 'SyzozCatalogAdmin/1.0 (+https://syzoz.com/chart/)', 'Accept-Encoding': 'identity'}
         if body is not None:
             request_headers['Content-Type'] = 'application/json'
         if credential:
