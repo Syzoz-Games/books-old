@@ -31,7 +31,10 @@ class SyncError(RuntimeError):
         super().__init__(reason)
         self.source, self.status, self.challenge = source, status, challenge
 
-class WebsiteChallenge(SyncError):
+class WebsiteUnavailable(SyncError):
+    """Temporary website transport or service failure; saved work remains pending."""
+
+class WebsiteChallenge(WebsiteUnavailable):
     """The host still returned a browser challenge after the retry budget."""
 
 def is_website_challenge(raw):
@@ -93,30 +96,36 @@ class Http:
                             reason += ': ' + re.sub(r'[\x00-\x1f\x7f]', ' ', message)[:300]
                     except (ValueError, AttributeError):
                         pass
-                raise SyncError(reason, source, status, challenge)
+                error_type = WebsiteUnavailable if source == 'website' and (status in (408, 425, 429) or status >= 500) else SyncError
+                raise error_type(reason, source, status, challenge)
             return raw
         except SyncError:
             raise
-        except (OSError, TimeoutError, http.client.HTTPException):
-            raise SyncError('Ordinary HTTP request failed or timed out', source) from None
+        except (OSError, TimeoutError, http.client.HTTPException) as error:
+            cause = getattr(error, 'reason', error)
+            detail = type(cause).__name__
+            if isinstance(getattr(cause, 'errno', None), int):
+                detail += f' errno={cause.errno}'
+            error_type = WebsiteUnavailable if source == 'website' else SyncError
+            raise error_type('HTTP transport failed: ' + detail, source) from None
 
-    def website(self, url, payload, credential, metadata=False, timeout=45, attempts=3):
+    def website(self, url, payload, credential, metadata=False, timeout=45, attempts=3, retry_seconds=None):
         raw_request = compact(payload)
-        retry_until = min(self.deadline, time.monotonic() + max(120, timeout))
+        retry_until = min(self.deadline, time.monotonic() + (max(120, timeout) if retry_seconds is None else retry_seconds))
         attempt = 0
         self.local.challenge_retries = 0
         while True:
             try:
                 remaining = retry_until - time.monotonic()
                 if remaining <= 0:
-                    raise SyncError('Website request retry budget reached', 'website')
+                    raise WebsiteUnavailable('Website request retry budget reached', 'website')
                 raw = self.request(url, 'website', raw_request, credential, maximum=1_000_000, timeout=min(timeout, remaining))
                 try:
                     result = json.loads(raw)
                 except ValueError:
                     if is_website_challenge(raw):
                         raise WebsiteChallenge('Host returned the One moment, please browser challenge', 'website', challenge=True) from None
-                    raise SyncError('Website returned invalid JSON', 'website') from None
+                    raise WebsiteUnavailable('Website returned invalid JSON', 'website') from None
                 if not isinstance(result, dict) or result.get('error'):
                     raise SyncError('Website rejected this checkpoint', 'website')
                 if metadata and (result.get('claim_id') != payload['claim_id'] or result.get('run_id') != payload['run_id'] or result.get('payload_hash') != hashlib.sha256(raw_request).hexdigest()):
@@ -126,12 +135,12 @@ class Http:
                 if error.challenge:
                     remaining = retry_until - time.monotonic()
                     if remaining <= 3:
-                        raise WebsiteChallenge('Host browser challenge persisted for the two-minute request budget; checkpoint retained', 'website', error.status, True) from None
+                        raise WebsiteChallenge('Host browser challenge persisted for the request budget; checkpoint retained', 'website', error.status, True) from None
                     self.local.challenge_retries += 1
                     print(f'Host browser challenge: waiting 3 seconds before retry {self.local.challenge_retries}', flush=True)
                     time.sleep(3)
                     continue
-                if error.status is not None and error.status < 500 or attempt >= attempts - 1:
+                if (error.status is not None and error.status < 500 and error.status not in (408, 425, 429)) or attempt >= attempts - 1:
                     raise
                 if retry_until - time.monotonic() <= attempt + 2:
                     raise
@@ -436,11 +445,19 @@ def release_dates(http, credential, run, batches=None):
 
 
 def sync_metadata(http, credential, run, batches):
+    try:
+        return sync_metadata_batches(http, credential, run, batches)
+    except WebsiteUnavailable as error:
+        print(f'::warning::Metadata server unavailable: {error}. Pending work is retained for a later scan.', flush=True)
+        return {'status': 'deferred', 'batches': 0, 'stored': 0, 'dated': 0, 'deferred': True}
+
+
+def sync_metadata_batches(http, credential, run, batches):
     stored = dated = processed = 0
     for number in range(batches):
         claim = f'{run}-metadata-{number}'
-        base = {'run_id': run, 'claim_id': claim}
-        result = http.website(METADATA, {'action': 'claim', **base, 'limit': 50}, credential, metadata=True)
+        base = {'run_id': run, 'claim_id': claim, 'scan_id': getattr(http, 'metadata_scan_id', run)}
+        result = http.website(METADATA, {'action': 'claim', **base, 'limit': 50}, credential, metadata=True, timeout=20, retry_seconds=60)
         packages = result.get('packages')
         if not isinstance(packages, list) or len(packages) > 50 or len(set(packages)) != len(packages) or any(not isinstance(p, str) or len(p) > 250 or not PACKAGE.fullmatch(p) for p in packages):
             raise SyncError('Website returned an invalid metadata claim', 'website')
@@ -468,7 +485,7 @@ def sync_metadata(http, credential, run, batches):
                     except (ValueError, TypeError, OSError):
                         failures[package] = SyncError('Metadata download returned invalid data', 'tapi.pureapk.com')
             attach_play_metrics(http, details)
-            receipt = http.website(METADATA, {'action': 'submit', **base, 'details': details, 'failed_packages': list(failures)}, credential, metadata=True)
+            receipt = http.website(METADATA, {'action': 'submit', **base, 'details': details, 'failed_packages': list(failures)}, credential, metadata=True, timeout=20, retry_seconds=60)
             if receipt.get('status') != 'submitted':
                 raise SyncError('Website did not acknowledge metadata submission', 'website')
             submitted = True
@@ -479,12 +496,13 @@ def sync_metadata(http, credential, run, batches):
             if failures:
                 denial = next((e for e in failures.values() if e.status in (403, 429)), None)
                 if denial is not None:
-                    raise denial
-                print(json.dumps({'phase': 'metadata_retry', 'deferred': len(failures), 'reason': 'Temporary per-game failures requeued; continuing'}), flush=True)
+                    print(f'::warning::Metadata provider returned HTTP {denial.status}; failed games deferred to the next scan.', flush=True)
+                    return {'status': 'deferred', 'batches': processed, 'stored': stored, 'dated': dated, 'deferred': True}
+                print(json.dumps({'phase': 'metadata_retry', 'deferred': len(failures), 'reason': 'Failed games deferred to the next scan', 'errors': sorted({f'{e.source}: HTTP {e.status}' if e.status else f'{e.source}: {e}' for e in failures.values()})[:5]}), flush=True)
         finally:
             if not submitted:
                 try:
-                    http.website(METADATA, {'action': 'release', **base}, credential, metadata=True)
+                    http.website(METADATA, {'action': 'release', **base}, credential, metadata=True, timeout=5, attempts=1, retry_seconds=5)
                 except SyncError:
                     pass
     return {'status': 'bounded', 'batches': processed, 'stored': stored, 'dated': dated}
