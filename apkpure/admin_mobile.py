@@ -102,7 +102,7 @@ class Http:
 
     def website(self, url, payload, credential, metadata=False, timeout=45, attempts=3):
         raw_request = compact(payload)
-        retry_until = min(self.deadline, time.monotonic() + 120)
+        retry_until = min(self.deadline, time.monotonic() + max(120, timeout))
         attempt = 0
         self.local.challenge_retries = 0
         while True:
@@ -137,6 +137,27 @@ class Http:
                     raise
                 time.sleep(attempt + 1)
                 attempt += 1
+
+def finish_mirror(http, token, run_id):
+    """Resume short, durable catalog batches until the server confirms completion."""
+    payload = {'action': 'finish', 'run_id': run_id}
+    while http.deadline - time.monotonic() > 10:
+        try:
+            state = http.website(MIRROR, payload, token, timeout=45, attempts=1)
+        except SyncError as error:
+            if error.status is not None and error.status < 500 and error.status != 429:
+                raise
+            print(f'::warning::Finalization request interrupted: {error}; resuming saved batches.', flush=True)
+            time.sleep(1)
+            continue
+        if state.get('complete') is True:
+            return state
+        if state.get('finalizing') is not True:
+            raise SyncError('Invalid finalization progress response', 'website')
+        print(json.dumps({'finalization': state.get('phase'), 'processed': state.get('processed'), 'changed': state.get('changed'), 'busy': bool(state.get('busy'))}), flush=True)
+        if state.get('busy'):
+            time.sleep(min(3, max(1, float(state.get('retry_after', 1)))))
+    raise SyncError('Finalization time budget reached; saved batches will resume on retry', 'website')
 
 def xml_document(raw, root_name):
     if not isinstance(raw, bytes) or re.search(br'<!DOCTYPE|<!ENTITY', raw, re.I):
@@ -267,7 +288,7 @@ def sync_sitemaps(http, credential, run, metadata_batches=0):
             saved = upload('file', url=url, sha256=hashlib.sha256(body).hexdigest(), gzip=base64.b64encode(zipped).decode('ascii'))
             print(json.dumps({'phase': 'sitemaps', 'file': url.rsplit('/', 1)[-1], 'saved_this_run': number, 'pending_at_start': len(pending), 'entries': saved.get('entries'), 'files_done': saved.get('files_done')}), flush=True)
             index_metadata(f'file-{number}')
-        result = upload('finish')
+        result = finish_mirror(http, credential, run)
         if result.get('complete') is not True:
             raise SyncError('Website did not confirm the complete sitemap checkpoint', 'website')
         return {'status': 'complete', 'manifest_files': len(manifest), 'downloaded_files': len(pending), 'metadata': metadata}
