@@ -5,7 +5,7 @@ import random
 import time
 import uuid
 
-from apkpure.admin_mobile import Http, METADATA, SyncError, catalog_credential, fetch_play_metrics
+from apkpure.admin_mobile import Http, METADATA, SyncError, WebsiteUnavailable, catalog_credential, fetch_play_metrics
 
 
 class CheckpointPending(Exception):
@@ -13,11 +13,9 @@ class CheckpointPending(Exception):
 
 
 def retryable(error):
-    return error.status in (408, 425, 429) or (error.status is not None and error.status >= 500) or (
-        error.status is None and str(error) in (
-            "Website returned invalid JSON", "Ordinary HTTP request failed or timed out"
-        )
-    )
+    # Transport, temporary HTTP failures, invalid JSON and browser challenges
+    # share this type. Authentication and invalid receipts remain hard errors.
+    return isinstance(error, WebsiteUnavailable)
 
 
 def post_checkpoint(http, credential, request, deadline):
@@ -27,7 +25,8 @@ def post_checkpoint(http, credential, request, deadline):
     while time.monotonic() < deadline - 2:
         try:
             return http.website(METADATA, request, credential, metadata=True,
-                                timeout=min(35, deadline - time.monotonic()), attempts=1)
+                                timeout=min(35, deadline - time.monotonic()), attempts=1,
+                                retry_seconds=max(0, deadline - time.monotonic()))
         except SyncError as error:
             if not retryable(error):
                 raise
