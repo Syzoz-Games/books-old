@@ -38,12 +38,15 @@ def mobile_plan(m, args, run):
 def mobile_work(m,args,plan):
  token=credential('mobile',m);http=m.Http(args.seconds)
  if plan['mode']=='release_dates':return m.release_dates(http,token,f"{plan['run_id']}-worker-{args.worker}")
- browser=m.SitemapBrowser(http);round_number=0
+ browser=m.SitemapBrowser(http);round_number=0;metadata_deferred=False
+ http.metadata_scan_id=plan['run_id']
  def metadata():
-  nonlocal round_number
-  if plan['mode']=='sitemaps' or not args.metadata_batches:return {'batches':0,'stored':0,'dated':0}
+  nonlocal round_number,metadata_deferred
+  if metadata_deferred or plan['mode']=='sitemaps' or not args.metadata_batches:return {'batches':0,'stored':0,'dated':0}
   claim_run=f"{plan['run_id']}-worker-{args.worker}-attempt-{os.environ.get('GITHUB_RUN_ATTEMPT','1')}-round-{round_number}";round_number+=1
-  return m.sync_metadata(http,token,claim_run,args.metadata_batches)
+  result=m.sync_metadata(http,token,claim_run,args.metadata_batches)
+  metadata_deferred=bool(result.get('deferred'))
+  return result
  try:
   metadata()
   state=http.website(m.MIRROR,{'action':'parallel-status','run_id':plan['run_id']},token) if plan['mode']!='metadata' else {'pending':[]}
@@ -66,9 +69,9 @@ def mobile_work(m,args,plan):
   while http.deadline-time.monotonic()>60:
    result=metadata()
    if not result['batches']:break
-  if plan['mode']=='all' and http.deadline-time.monotonic()>40:m.release_dates(http,token,f"{plan['run_id']}-worker-{args.worker}")
+  if plan['mode']=='all' and not metadata_deferred and http.deadline-time.monotonic()>40:m.release_dates(http,token,f"{plan['run_id']}-worker-{args.worker}")
  finally:browser.close()
- return {'worker':args.worker,'checkpointed':True}
+ return {'worker':args.worker,'checkpointed':True,'metadata_deferred':metadata_deferred}
 
 def mobile_finish(m,args,plan):
  if plan['mode']=='release_dates':return m.Http(120).website(m.METADATA,{'scope':'release_dates','action':'status','run_id':plan['run_id'],'claim_id':plan['run_id']+'-status'},credential('mobile',m))
