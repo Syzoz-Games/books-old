@@ -36,7 +36,13 @@ def mobile_plan(m, args, run):
  return plan
 
 def mobile_work(m,args,plan):
- token=credential('mobile',m);http=m.Http(args.seconds)
+ try:return mobile_work_saved(m,args,plan)
+ except m.WebsiteUnavailable as error:
+  print(f'::warning::Mobile server request unavailable: {error}. Unconfirmed work remains pending for a later scan.',flush=True)
+  return {'worker':args.worker,'deferred':True,'retry_pending':True}
+
+def mobile_work_saved(m,args,plan):
+ token=credential('mobile',m);http=m.Http(args.seconds);http.website_retry_seconds=60
  if plan['mode']=='release_dates':return m.release_dates(http,token,f"{plan['run_id']}-worker-{args.worker}")
  browser=m.SitemapBrowser(http);round_number=0;metadata_deferred=False
  http.metadata_scan_id=plan['run_id']
