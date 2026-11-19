@@ -19,5 +19,5 @@ jobs:
       - name: Resume anonymous collection
         env:
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
-          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+          STEAM_SYNC_URL: https://syzoz.com/chart/steam-sync.php
         run: python collect.py --seconds 21600 --batch 1000
