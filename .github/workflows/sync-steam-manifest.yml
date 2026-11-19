@@ -74,7 +74,7 @@ jobs:
           RUNNERS: ${{ inputs.runners }}
           INCLUDE_UNRELEASED: ${{ inputs.include_unreleased }}
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
-          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+          STEAM_SYNC_URL: https://syzoz.com/chart/steam-sync.php
         run: |
           python - <<'PY'
           import os,subprocess,sys
@@ -170,7 +170,7 @@ jobs:
       - name: Publish shared fields and advance only the completed query checkpoint
         env:
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
-          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+          STEAM_SYNC_URL: https://syzoz.com/chart/steam-sync.php
         run: python batch.py finalize --manifest manifest.json --directory batch-results --upload --production
       - uses: actions/upload-artifact@v4
         if: always()
