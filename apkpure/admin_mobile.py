@@ -111,7 +111,9 @@ class Http:
 
     def website(self, url, payload, credential, metadata=False, timeout=45, attempts=3, retry_seconds=None):
         raw_request = compact(payload)
-        retry_until = min(self.deadline, time.monotonic() + (max(120, timeout) if retry_seconds is None else retry_seconds))
+        if retry_seconds is None:
+            retry_seconds = getattr(self, 'website_retry_seconds', max(120, timeout))
+        retry_until = min(self.deadline, time.monotonic() + retry_seconds)
         attempt = 0
         self.local.challenge_retries = 0
         while True:
