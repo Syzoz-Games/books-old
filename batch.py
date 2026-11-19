@@ -250,7 +250,7 @@ class IsolatedReceiver:
  marker='test'
  def __init__(self,url,token,github,seconds=240):
   parsed=urllib.parse.urlsplit(url)
-  if parsed.scheme!='https' or parsed.netloc!='syzoz.com' or parsed.path!='/game-explorer/steam-sync.php' or parsed.query or parsed.fragment:raise BatchError('Unexpected isolated receiver URL')
+  if parsed.scheme!='https' or parsed.netloc!='syzoz.com' or parsed.path!='/chart/steam-sync.php' or parsed.query or parsed.fragment:raise BatchError('Unexpected isolated receiver URL')
   if len(token)<32 or '\r' in token or '\n' in token:raise BatchError('Missing isolated upload credential')
   self.url=url;self.token=token;self.github=github;self.deadline=time.monotonic()+seconds;self.opener=urllib.request.build_opener(NoRedirect())
  def call(self,action,**fields):
@@ -369,7 +369,7 @@ def main(argv=None):
    resume=json.loads(args.resume_manifest.read_text()) if args.resume_manifest else None
    if args.production:
     if args.start!=0 or resume is not None:raise BatchError('Production planning uses only the server-owned query checkpoint')
-    receiver=ProductionReceiver(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/game-explorer/steam-sync.php'),os.environ.get('STEAM_SYNC_TOKEN',''),github);reuse=json.loads(args.reuse_manifest.read_text()) if args.reuse_manifest else None;result=production_manifest(JsonClient(args.seconds,.5),receiver,args.limit,args.logical_workers,args.runners,github,args.include_unreleased,reuse)
+    receiver=ProductionReceiver(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/chart/steam-sync.php'),os.environ.get('STEAM_SYNC_TOKEN',''),github);reuse=json.loads(args.reuse_manifest.read_text()) if args.reuse_manifest else None;result=production_manifest(JsonClient(args.seconds,.5),receiver,args.limit,args.logical_workers,args.runners,github,args.include_unreleased,reuse)
    else:
     if args.reuse_manifest:raise BatchError('Exact-run manifest reuse is reserved for production replay')
     result=plan_manifest(JsonClient(args.seconds,.5),args.limit,args.logical_workers,args.runners,github,args.start,args.include_unreleased,resume)
@@ -387,9 +387,9 @@ def main(argv=None):
    manifest=json.loads(args.manifest.read_text());validate_manifest(manifest,github);data=merged_shards(manifest,args.directory);result={'status':'staged','github':github,'manifest_hash':manifest['manifest_hash'],'planned':len(manifest['appids']),'records':len(data['records']),'details':len(data['details']),'outcomes':len(data['outcomes']),'production_writes':0,'coverage':{field:sum(row.get(field) is not None and row.get(field)!='' for row in data['records']) for field in ('icon','is_free','price','release_ts','updated_date','version','size','category','tags','rating','description','iap','architectures','installs')},'media_coverage':{field:sum(bool(row.get(field)) for row in data['details']) for field in ('screenshots','trailers')}}
    if args.production and not args.upload:raise BatchError('Production finalization requires explicit upload mode')
    if args.upload and args.production:
-    receiver=ProductionReceiver(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/game-explorer/steam-sync.php'),os.environ.get('STEAM_SYNC_TOKEN',''),github);result['production_upload']=upload_production(receiver,manifest,data);result['status']='published_production_manifest';result['production_writes']=len(data['records'])
+    receiver=ProductionReceiver(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/chart/steam-sync.php'),os.environ.get('STEAM_SYNC_TOKEN',''),github);result['production_upload']=upload_production(receiver,manifest,data);result['status']='published_production_manifest';result['production_writes']=len(data['records'])
    elif args.upload:
-    receiver=IsolatedReceiver(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/game-explorer/steam-sync.php'),os.environ.get('STEAM_SYNC_TOKEN',''),github);result['isolated_upload']=upload_isolated(receiver,manifest,data);result['status']='uploaded_to_isolated_run'
+    receiver=IsolatedReceiver(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/chart/steam-sync.php'),os.environ.get('STEAM_SYNC_TOKEN',''),github);result['isolated_upload']=upload_isolated(receiver,manifest,data);result['status']='uploaded_to_isolated_run'
    write_json(args.output,result);print(compact(result).decode())
   return 0
  except (BatchError,ValueError,OSError) as error:
