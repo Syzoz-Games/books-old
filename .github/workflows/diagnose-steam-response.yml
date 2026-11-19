@@ -26,7 +26,7 @@ jobs:
               def redirect_request(self,*args,**kwargs): return None
           print(json.dumps({'slot':os.environ['PROBE_SLOT'],'dns':sorted({a[4][0] for a in socket.getaddrinfo('syzoz.com',443,type=socket.SOCK_STREAM)})}),flush=True)
           for attempt in range(3):
-              request=urllib.request.Request('https://syzoz.com/game-explorer/steam-sync.php',b'{"action":"state"}',{'Content-Type':'application/json','X-Steam-Token':token,'User-Agent':'Python-urllib/3.12'})
+              request=urllib.request.Request('https://syzoz.com/chart/steam-sync.php',b'{"action":"state"}',{'Content-Type':'application/json','X-Steam-Token':token,'User-Agent':'Python-urllib/3.12'})
               started=time.monotonic()
               try:
                   try: response=urllib.request.build_opener(NoRedirect).open(request,timeout=30)
