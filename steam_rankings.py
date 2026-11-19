@@ -23,7 +23,7 @@ SOURCES = {
 PAGE_SIZE = 100
 WORKERS = 60
 ENDPOINT = 'https://store.steampowered.com/search/results/'
-UPLOAD = 'https://syzoz.com/game-explorer/steam-rankings-sync.php'
+UPLOAD = 'https://syzoz.com/chart/steam-rankings-sync.php'
 
 
 class Rows(HTMLParser):
