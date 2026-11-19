@@ -27,7 +27,7 @@ jobs:
         env:
           SAMPLE_APP_IDS: ${{ inputs.appids }}
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
-          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+          STEAM_SYNC_URL: https://syzoz.com/chart/steam-sync.php
         run: |
           python - <<'PY'
           import os,re,subprocess,sys
