@@ -79,22 +79,7 @@ def mobile_finish(m,args,plan):
  state=status()
  if state.get('complete'):return state
  if state.get('pending_files')!=0:return http.website(m.MIRROR,{'action':'parallel-checkpoint',**payload},token)
- try:
-  # One mutation attempt; after a lost response, observe the durable receipt.
-  return http.website(m.MIRROR,{'action':'finish',**payload},token,timeout=300,attempts=1)
- except m.SyncError as error:
-  if error.status is not None and error.status<500:raise
-  failure=error
- while http.deadline-time.monotonic()>10:
-  time.sleep(3)
-  try:
-   state=status()
-  except m.SyncError as error:
-   if error.status is not None and error.status<500:raise
-   continue
-  if state.get('complete'):return state
-  if not state.get('finalizing'):raise failure
- raise failure
+ return m.finish_mirror(http,token,plan['run_id'])
 
 def steam_transport(m):return m.Transport(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/chart/steam-sync.php'),credential('steam',m))
 
