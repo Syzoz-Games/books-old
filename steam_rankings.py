@@ -44,11 +44,14 @@ class Rows(HTMLParser):
         self.rows.append({'key': identity, 'appid': app})
 
 
-def request(url, data=None, headers=None):
+def request(url, data=None, headers=None, deadline=None):
     for attempt in range(6):
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            raise TimeoutError('Ranking validation budget exhausted; live files unchanged')
         try:
             req = Request(url, data=data, headers={'User-Agent': 'SyzozCatalog/1.0', **(headers or {})})
-            with urlopen(req, timeout=45) as response:
+            with urlopen(req, timeout=45 if remaining is None else min(45, remaining)) as response:
                 raw = response.read(12_000_001)
             if len(raw) > 12_000_000:
                 raise ValueError('Response exceeds safety limit')
@@ -63,13 +66,16 @@ def request(url, data=None, headers=None):
             if attempt == 5:
                 raise
             delay = min(30, 2 ** attempt)
-        time.sleep(delay + random.random())
+        delay += random.random()
+        if deadline is not None and time.monotonic() + delay >= deadline:
+            raise TimeoutError('Ranking validation budget exhausted; live files unchanged')
+        time.sleep(delay)
 
 
-def fetch(name, start):
+def fetch(name, start, deadline=None):
     params = dict(SOURCES[name], start=start, count=PAGE_SIZE, infinite=1,
                   ndl=1, ignore_preferences=1, cc='us', l='english')
-    data = request(ENDPOINT + '?' + urlencode(params))
+    data = request(ENDPOINT + '?' + urlencode(params), deadline=deadline)
     if data.get('success') != 1 or not isinstance(data.get('total_count'), int):
         raise ValueError('Steam returned an invalid search response')
     total = data['total_count']
@@ -121,6 +127,49 @@ def worker(folder, slot):
     save(folder / f'worker-{slot}.json', dict(slot=slot, plan=digest, pages=pages))
 
 
+def verified_pages(name, first, staged, deadline):
+    """Recollect changed lists without combining old and new page generations.
+
+    Steam has no snapshot cursor. Comparing the head before and after collection
+    detects visible movement, but cannot promise a frozen point-in-time ranking.
+    """
+    fresh = fetch(name, 0, deadline=deadline)
+    candidate = dict(staged) if fresh['rows'] == first['rows'] else {}
+    for attempt in range(3):
+        if not candidate:
+            print(f'{name}: list changed; recollecting all pages (attempt {attempt + 1}/3)', flush=True)
+        candidate[0] = fresh
+        # The actual short final page determines the total, including growth
+        # across page boundaries or a shrinking list. Totals are never fixed.
+        tail = ((fresh['total'] - 1) // PAGE_SIZE) * PAGE_SIZE
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Ranking validation budget exhausted; live files unchanged')
+            end_page = fetch(name, tail, deadline=deadline)
+            candidate[tail] = end_page
+            if not end_page['rows'] and tail > end_page['total']:
+                tail = ((end_page['total'] - 1) // PAGE_SIZE) * PAGE_SIZE
+                continue
+            if len(end_page['rows']) < PAGE_SIZE:
+                total = tail + len(end_page['rows'])
+                break
+            tail += PAGE_SIZE
+        for offset in range(0, total, PAGE_SIZE):
+            expected = min(PAGE_SIZE, total - offset)
+            page = candidate.get(offset)
+            if page is None or len(page['rows']) != expected:
+                page = fetch(name, offset, deadline=deadline)
+                candidate[offset] = page
+            if len(page['rows']) != expected:
+                raise ValueError(f'{name}: incomplete page {offset}; live files unchanged')
+        after = fetch(name, 0, deadline=deadline)
+        if after['rows'] == fresh['rows']:
+            return total, candidate
+        # Discard every page of this list before another collection attempt.
+        fresh, candidate = after, {}
+    raise ValueError(f'{name}: list kept changing after 3 attempts; live files unchanged')
+
+
 def assemble(folder, verify_live=True):
     manifest = load(folder / 'plan.json')
     digest = hashlib.sha256((folder / 'plan.json').read_bytes()).hexdigest()
@@ -135,35 +184,20 @@ def assemble(folder, verify_live=True):
             raise ValueError(f'Worker {slot} has incomplete or duplicate pages')
         pages.update({(page['name'], page['start']): page for page in output['pages']})
     files, totals = {}, {}
+    deadline = time.monotonic() + 180
     for name, planned_total in manifest['totals'].items():
         total = planned_total
         if verify_live:
-            fresh = fetch(name, 0)
-            if fresh['rows'] != manifest['first'][name]['rows']:
-                raise ValueError(f'{name}: leading positions changed during collection; live files unchanged')
-            # Steam reports slightly different totals on adjacent pages. The actual
-            # short final page is authoritative; never use a fixed catalog ceiling.
-            tail = ((fresh['total'] - 1) // PAGE_SIZE) * PAGE_SIZE
-            deadline = time.monotonic() + 300
-            while True:
-                if time.monotonic() > deadline:
-                    raise ValueError('Steam list end did not settle; live files unchanged')
-                end_page = fetch(name, tail)
-                pages[(name, tail)] = end_page
-                if not end_page['rows'] and tail > end_page['total']:
-                    tail = ((end_page['total'] - 1) // PAGE_SIZE) * PAGE_SIZE
-                    continue
-                if len(end_page['rows']) < PAGE_SIZE:
-                    total = tail + len(end_page['rows'])
-                    break
-                tail += PAGE_SIZE
+            total, verified = verified_pages(
+                name, manifest['first'][name],
+                {offset: page for (source, offset), page in pages.items() if source == name},
+                deadline)
+            pages.update({(name, offset): page for offset, page in verified.items()})
         totals[name] = total
         ranks, identities, duplicates = {}, set(), 0
         for offset in range(0, total, PAGE_SIZE):
             page = pages.get((name, offset))
             expected = min(PAGE_SIZE, total - offset)
-            if verify_live and (page is None or len(page['rows']) != expected):
-                page = fetch(name, offset)
             if page is None or len(page['rows']) != expected:
                 raise ValueError('Incomplete page in staging')
             for index, row in enumerate(page['rows'], offset + 1):
