@@ -41,7 +41,7 @@ jobs:
       - name: Plan resumable catalog partitions
         env:
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
-          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+          STEAM_SYNC_URL: https://syzoz.com/chart/steam-sync.php
           SYNC_SECONDS: ${{ inputs.seconds || '21300' }}
           OWNERS_SECONDS: ${{ inputs.owners_seconds || '300' }}
           ENGINE_SECONDS: ${{ inputs.engine_seconds || '60' }}
@@ -73,7 +73,7 @@ jobs:
       - name: Download and process assigned catalog pages
         env:
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
-          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+          STEAM_SYNC_URL: https://syzoz.com/chart/steam-sync.php
           SYNC_SECONDS: ${{ inputs.seconds || '21300' }}
           OWNERS_SECONDS: ${{ inputs.owners_seconds || '300' }}
           ENGINE_SECONDS: ${{ inputs.engine_seconds || '60' }}
@@ -96,7 +96,7 @@ jobs:
       - name: Finalize checkpoints and saved-game estimates
         env:
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
-          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+          STEAM_SYNC_URL: https://syzoz.com/chart/steam-sync.php
           SYNC_SECONDS: ${{ inputs.seconds || '21300' }}
           OWNERS_SECONDS: ${{ inputs.owners_seconds || '300' }}
           ENGINE_SECONDS: ${{ inputs.engine_seconds || '60' }}
@@ -115,7 +115,7 @@ jobs:
       - name: Resume collection or saved-game enrichment
         env:
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
-          STEAM_SYNC_URL: https://syzoz.com/game-explorer/steam-sync.php
+          STEAM_SYNC_URL: https://syzoz.com/chart/steam-sync.php
           SYNC_MODE: ${{ inputs.mode || 'collect' }}
           SYNC_SECONDS: ${{ inputs.seconds || '21300' }}
           OWNERS_SECONDS: ${{ inputs.owners_seconds || '300' }}
