@@ -96,7 +96,7 @@ def mobile_finish(m,args,plan):
   if not state.get('finalizing'):raise failure
  raise failure
 
-def steam_transport(m):return m.Transport(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/game-explorer/steam-sync.php'),credential('steam',m))
+def steam_transport(m):return m.Transport(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/chart/steam-sync.php'),credential('steam',m))
 
 def steam_deferred(error, **fields):
  print(f'::warning::{error}. Skipping unavailable work; unconfirmed pages remain at their saved server checkpoints for a later sync.',flush=True)
