@@ -51,7 +51,7 @@ jobs:
   publish:
     needs: [plan, collect]
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,7 +61,7 @@ jobs:
           pattern: steam-rank-*
           merge-multiple: true
           path: rankings-stage
-      - name: Validate complete lists and publish atomically
+      - name: Validate lists independently and publish successful lists
         run: python3 steam_rankings.py publish
         env:
           STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
