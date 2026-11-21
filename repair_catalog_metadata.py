@@ -76,6 +76,17 @@ def progress_line(p):
             f"| pending {p['pending']} | active {p['leased']}")
 
 
+def post_until(http, token, payload, deadline):
+    # Reuse identical bytes/claim IDs after a busy host or a lost upload receipt.
+    deadline = min(deadline, http.deadline - 5)
+    while time.monotonic() < deadline - 2:
+        try:
+            return post_checkpoint(http, token, payload, deadline)
+        except CheckpointPending:
+            print('::warning::Host still busy; keeping this worker alive and retrying the same request.', flush=True)
+    raise CheckpointPending('Request budget exhausted; unfinished leases remain resumable.')
+
+
 def main():
     minutes = min(320, max(1, int(os.environ.get('REPAIR_MINUTES', '300'))))
     max_batches = max(0, int(os.environ.get('REPAIR_MAX_BATCHES', '0')))
@@ -83,36 +94,43 @@ def main():
     run = os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'] + '-' + slot
     token = catalog_credential(os.environ['STEAM_SYNC_TOKEN'])
     http = Http(minutes * 60)
-    def post(action, claim=None, **fields):
+    def post(action, claim=None, until=None, **fields):
         payload = dict(scope='metadata_repair', action=action, run_id=run,
                        claim_id=claim or uuid.uuid4().hex, **fields)
-        return post_checkpoint(http, token, payload, http.deadline)
+        return post_until(http, token, payload, until or min(http.deadline - 30, time.monotonic() + 240))
     time.sleep(int(slot) * .5)
     batches, latest = 0, None
     try:
-        latest = post('status')['progress']
-        print(progress_line(latest), flush=True)
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-            # A batch can retry slow sources. Reserve ten minutes for it and upload.
             while http.deadline - time.monotonic() > 600 and (not max_batches or batches < max_batches):
                 claim = uuid.uuid4().hex
-                batch = post('claim', claim, limit=10)
-                latest = batch['progress']
-                if batch['status'] == 'empty':
-                    print('No unclaimed work remains. Active leases, if any, are resumable.', flush=True)
-                    break
-                if batch['status'] != 'claimed':
-                    raise RuntimeError('Unexpected repair claim status')
-                futures = {pool.submit(repair_one, item, http): item['package'] for item in batch['items']}
-                results = {futures[f]: f.result() for f in concurrent.futures.as_completed(futures)}
-                ack = post('submit', claim, results=results)
-                if ack.get('status') != 'submitted' or set(ack.get('results', {})) != set(results):
-                    raise RuntimeError('Unconfirmed repair upload')
-                latest = ack['progress'];batches += 1
-                for pkg, result in ack['results'].items():
-                    print(f"{pkg}: {result['state']}; +{result['fields_filled']} fields; missing: {','.join(result['missing']) or 'none'}", flush=True)
-                print(progress_line(latest), flush=True)
-                time.sleep(.5)
+                try:
+                    batch = post('claim', claim, limit=10)
+                    latest = batch['progress']
+                    if batch['status'] == 'empty':
+                        if latest['leased']:
+                            print('Waiting for active or abandoned leases before checking the queue again.', flush=True)
+                            time.sleep(30)
+                            continue
+                        print('No pending repair work remains.', flush=True)
+                        break
+                    if batch['status'] != 'claimed':
+                        raise RuntimeError('Unexpected repair claim status')
+                    futures = {pool.submit(repair_one, item, http): item['package'] for item in batch['items']}
+                    results = {futures[f]: f.result() for f in concurrent.futures.as_completed(futures)}
+                    # Stop resending before the host can give this lease to another worker.
+                    upload_until = min(http.deadline - 30, time.monotonic() + max(0, batch['lease_until'] - time.time() - 30))
+                    ack = post('submit', claim, until=upload_until, results=results)
+                    if ack.get('status') != 'submitted' or set(ack.get('results', {})) != set(results):
+                        raise RuntimeError('Unconfirmed repair upload')
+                    latest = ack['progress'];batches += 1
+                    for pkg, result in ack['results'].items():
+                        print(f"{pkg}: {result['state']}; +{result['fields_filled']} fields; missing: {','.join(result['missing']) or 'none'}", flush=True)
+                    print(progress_line(latest), flush=True)
+                    time.sleep(.5)
+                except CheckpointPending as exc:
+                    print(f'::warning::{exc} Continuing with the repair queue; saved work is retained.', flush=True)
+                    time.sleep(2)
         latest = post('status')['progress']
         if latest['pending'] or latest['leased']:
             print('::warning::Repair has unfinished records. Rerun this manual workflow to resume; saved repairs are retained.', flush=True)

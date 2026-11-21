@@ -2,10 +2,27 @@ import unittest
 from unittest.mock import Mock, patch
 from apkpure.admin_mobile import WebsiteUnavailable, SyncError
 from play_history import post_checkpoint
-from repair_catalog_metadata import normalize, repair_one, progress_line
+from repair_catalog_metadata import normalize, repair_one, progress_line, post_until
+from play_history import CheckpointPending
 
 
 class RepairTests(unittest.TestCase):
+    def test_worker_survives_a_checkpoint_retry_window(self):
+        http = Mock(deadline=1000)
+        payload = {'action': 'submit', 'claim_id': 'same'}
+        with patch('repair_catalog_metadata.time.monotonic', return_value=0), patch('repair_catalog_metadata.post_checkpoint', side_effect=[CheckpointPending('busy'), {'status': 'submitted'}]) as post:
+            self.assertEqual(post_until(http, 'test', payload, 900), {'status': 'submitted'})
+        self.assertEqual(post.call_count, 2)
+        for call in post.call_args_list:
+            self.assertIs(call.args[2], payload)
+
+    def test_expired_upload_does_not_resend(self):
+        http = Mock(deadline=1000)
+        with patch('repair_catalog_metadata.time.monotonic', return_value=900), patch('repair_catalog_metadata.post_checkpoint') as post:
+            with self.assertRaises(CheckpointPending):
+                post_until(http, 'test', {}, 850)
+        post.assert_not_called()
+
     def test_host_busy_retries_the_same_payload(self):
         http = Mock()
         payload = {'action': 'submit', 'claim_id': 'same-claim'}
