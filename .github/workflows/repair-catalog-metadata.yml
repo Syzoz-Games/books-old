@@ -1,0 +1,42 @@
+name: Temporary catalog metadata repair
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Maximum minutes per worker (up to 320); rerun to resume
+        default: '300'
+        required: true
+      max_batches:
+        description: Batches of 10 per worker; 0 processes until the time limit
+        default: '0'
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: temporary-catalog-metadata-repair
+  cancel-in-progress: false
+jobs:
+  repair:
+    name: Repair worker ${{ matrix.slot }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        slot: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate repair behavior
+        run: python3 -m unittest test_metadata_repair.py
+      - name: Fill missing catalog metadata
+        env:
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          SLOT: ${{ matrix.slot }}
+          REPAIR_MINUTES: ${{ inputs.minutes }}
+          REPAIR_MAX_BATCHES: ${{ inputs.max_batches }}
+        run: python3 -u repair_catalog_metadata.py
