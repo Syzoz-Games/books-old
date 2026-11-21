@@ -1,4 +1,4 @@
-"""Collect public Steam list positions, then publish one complete generation.
+"""Collect public Steam list positions and publish each successfully validated list.
 No sales/wishlist counts are inferred. Non-app rows retain their positions.
 """
 import argparse
@@ -24,6 +24,11 @@ PAGE_SIZE = 100
 WORKERS = 60
 ENDPOINT = 'https://store.steampowered.com/search/results/'
 UPLOAD = 'https://syzoz.com/chart/steam-rankings-sync.php'
+RETRYABLE_HTTP_STATUS = (408, 429, 500, 502, 503, 504)
+
+
+class RankingValidationTimeout(TimeoutError):
+    """The live validation deadline cannot accommodate more requests/retries."""
 
 
 class Rows(HTMLParser):
@@ -48,7 +53,7 @@ def request(url, data=None, headers=None, deadline=None):
     for attempt in range(6):
         remaining = None if deadline is None else deadline - time.monotonic()
         if remaining is not None and remaining <= 0:
-            raise TimeoutError('Ranking validation budget exhausted; live files unchanged')
+            raise RankingValidationTimeout('Ranking validation budget exhausted; live files unchanged')
         try:
             req = Request(url, data=data, headers={'User-Agent': 'SyzozCatalog/1.0', **(headers or {})})
             with urlopen(req, timeout=45 if remaining is None else min(45, remaining)) as response:
@@ -57,7 +62,7 @@ def request(url, data=None, headers=None, deadline=None):
                 raise ValueError('Response exceeds safety limit')
             return json.loads(raw)
         except HTTPError as error:
-            if error.code not in (408, 429, 500, 502, 503, 504) or attempt == 5:
+            if error.code not in RETRYABLE_HTTP_STATUS or attempt == 5:
                 raise
             retry_after = error.headers.get('Retry-After', '')
             delay = max(min(120, (30 if error.code == 429 else 1) * 2 ** attempt), int(retry_after) if retry_after.isdigit() else 0)
@@ -68,7 +73,7 @@ def request(url, data=None, headers=None, deadline=None):
             delay = min(30, 2 ** attempt)
         delay += random.random()
         if deadline is not None and time.monotonic() + delay >= deadline:
-            raise TimeoutError('Ranking validation budget exhausted; live files unchanged')
+            raise RankingValidationTimeout('Ranking validation budget exhausted; live files unchanged')
         time.sleep(delay)
 
 
@@ -144,7 +149,7 @@ def verified_pages(name, first, staged, deadline):
         tail = ((fresh['total'] - 1) // PAGE_SIZE) * PAGE_SIZE
         while True:
             if time.monotonic() >= deadline:
-                raise TimeoutError('Ranking validation budget exhausted; live files unchanged')
+                raise RankingValidationTimeout('Ranking validation budget exhausted; live files unchanged')
             end_page = fetch(name, tail, deadline=deadline)
             candidate[tail] = end_page
             if not end_page['rows'] and tail > end_page['total']:
@@ -183,51 +188,84 @@ def assemble(folder, verify_live=True):
         if actual != expected or len(actual) != len(output['pages']):
             raise ValueError(f'Worker {slot} has incomplete or duplicate pages')
         pages.update({(page['name'], page['start']): page for page in output['pages']})
-    files, totals = {}, {}
-    deadline = time.monotonic() + 180
+    files, totals, skipped = {}, {}, {}
     for name, planned_total in manifest['totals'].items():
-        total = planned_total
-        if verify_live:
-            total, verified = verified_pages(
-                name, manifest['first'][name],
-                {offset: page for (source, offset), page in pages.items() if source == name},
-                deadline)
-            pages.update({(name, offset): page for offset, page in verified.items()})
-        totals[name] = total
-        ranks, identities, duplicates = {}, set(), 0
-        for offset in range(0, total, PAGE_SIZE):
-            page = pages.get((name, offset))
-            expected = min(PAGE_SIZE, total - offset)
-            if page is None or len(page['rows']) != expected:
-                raise ValueError('Incomplete page in staging')
-            for index, row in enumerate(page['rows'], offset + 1):
-                if row['key'] in identities or row['appid'] is not None and row['appid'] in ranks:
-                    # Steam's own searchpage.js InitInfiniteScroll hides later
-                    # duplicates. Its public search has no frozen-snapshot cursor.
-                    # Keep the first observed source position, never overwrite it
-                    # or invent a compact rank after removing repeats.
-                    duplicates += 1
-                    continue
-                identities.add(row['key'])
-                if row['appid'] is not None:
-                    ranks[row['appid']] = index
+        try:
+            total = planned_total
+            if verify_live:
+                # Each list gets its own budget; a slow list cannot consume the
+                # time available for the following lists.
+                total, verified = verified_pages(
+                    name, manifest['first'][name],
+                    {offset: page for (source, offset), page in pages.items() if source == name},
+                    time.monotonic() + 180)
+                pages.update({(name, offset): page for offset, page in verified.items()})
+            ranks, identities, duplicates = {}, set(), 0
+            for offset in range(0, total, PAGE_SIZE):
+                page = pages.get((name, offset))
+                expected = min(PAGE_SIZE, total - offset)
+                if page is None or len(page['rows']) != expected:
+                    raise ValueError('Incomplete page in staging')
+                for index, row in enumerate(page['rows'], offset + 1):
+                    if row['key'] in identities or row['appid'] is not None and row['appid'] in ranks:
+                        # Keep Steam's first source position, including gaps.
+                        duplicates += 1
+                        continue
+                    identities.add(row['key'])
+                    if row['appid'] is not None:
+                        ranks[row['appid']] = index
+            if not ranks:
+                raise ValueError('No app rankings available')
+        except HTTPError as error:
+            if error.code not in RETRYABLE_HTTP_STATUS:
+                raise
+            skipped[name] = f'Steam returned HTTP {error.code} after retries'
+        except (URLError, TimeoutError, ConnectionError, ValueError) as error:
+            skipped[name] = str(error)[:300]
+        if name in skipped:
+            message = f'{name}: update skipped ({skipped[name]}). Previous live list retained if available.'
+            safe_message = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+            print(f'::warning title=Steam list not updated::{safe_message}', flush=True)
+            continue
         print(f'{name}: {total} source positions checked, {len(ranks)} unique apps, {duplicates} repeated rows hidden (Steam search behavior)', flush=True)
-        files[name] = ranks
+        files[name], totals[name] = ranks, total
         save(folder / (name + '.json'), ranks)
-    return dict(schema=1, run_id=manifest['run_id'], attempt=manifest['attempt'],
+    return dict(schema=2, run_id=os.environ.get('GITHUB_RUN_ID', manifest['run_id']),
+                attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT', manifest['attempt'])),
                 started=manifest['started'], finished=int(time.time()), region=manifest['region'],
-                totals=totals, files=files)
+                totals=totals, files=files, skipped=skipped)
+
+
+def publication_summary(updated, skipped):
+    summary = os.environ.get('GITHUB_STEP_SUMMARY')
+    if summary:
+        with open(summary, 'a', encoding='utf-8') as output:
+            output.write('### Steam rankings publication\n\n')
+            for name in SOURCES:
+                if name in updated:
+                    output.write(f'- **Updated:** `{name}`.\n')
+                elif name in skipped:
+                    output.write(f'- **Not updated:** `{name}` — previous live list retained if available. See the warning in the logs.\n')
+            if not updated:
+                output.write('\nNo fresh rankings were published.\n')
 
 
 def publish(folder):
-    payload = assemble(folder)
     token = os.environ.get('STEAM_SYNC_TOKEN', '')
     if len(token) < 32:
         raise ValueError('Upload credential is missing')
+    payload = assemble(folder)
+    if not payload['files']:
+        publication_summary([], payload['skipped'])
+        print('No lists passed validation; nothing uploaded, live files unchanged.', flush=True)
+        return
+    # Only validated lists are sent. The receiver merges omitted lists from
+    # the previous generation without changing their individual timestamps.
     raw = gzip.compress(json.dumps(payload, separators=(',', ':')).encode())
     result = request(UPLOAD, raw, {'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'X-Steam-Token': token})
-    if result.get('status') != 'published':
-        raise ValueError('Server did not confirm publication')
+    if result.get('status') != 'published' or set(result.get('updated', [])) != set(payload['files']):
+        raise ValueError('Server did not confirm publication of the successful lists')
+    publication_summary(payload['files'], payload['skipped'])
     print(json.dumps(result), flush=True)
 
 
