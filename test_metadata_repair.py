@@ -1,8 +1,29 @@
 import unittest
+from unittest.mock import Mock, patch
+from apkpure.admin_mobile import WebsiteUnavailable, SyncError
+from play_history import post_checkpoint
 from repair_catalog_metadata import normalize, repair_one, progress_line
 
 
 class RepairTests(unittest.TestCase):
+    def test_host_busy_retries_the_same_payload(self):
+        http = Mock()
+        payload = {'action': 'submit', 'claim_id': 'same-claim'}
+        http.website.side_effect = [WebsiteUnavailable('busy', 'website', 503), {'status': 'submitted'}]
+        with patch('play_history.time.monotonic', return_value=0), patch('play_history.time.sleep'):
+            self.assertEqual(post_checkpoint(http, 'test-token', payload, 100)['status'], 'submitted')
+        self.assertEqual(http.website.call_count, 2)
+        for call in http.website.call_args_list:
+            self.assertIs(call.args[1], payload)
+
+    def test_auth_failure_is_not_hidden_as_warning(self):
+        http = Mock()
+        http.website.side_effect = SyncError('unauthorized', 'website', 401)
+        with patch('play_history.time.monotonic', return_value=0):
+            with self.assertRaises(SyncError):
+                post_checkpoint(http, 'test-token', {'action': 'status'}, 100)
+        self.assertEqual(http.website.call_count, 1)
+
     def test_normalization_does_not_invent_absent_fields(self):
         self.assertEqual(normalize({'title': 'Game', 'icon_url': None, 'asset': {'size': 0}}, 'com.example.game'),
                          {'package_name': 'com.example.game', 'title': 'Game'})

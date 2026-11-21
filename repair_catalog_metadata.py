@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 
 from apkpure.admin_mobile import Http, METADATA, SyncError, catalog_credential, download_metadata
 from play_discovery import listing
+from play_history import CheckpointPending, post_checkpoint
 
 FIELDS = {'title': 'title', 'developer': 'developer', 'icon': 'icon_url',
           'description': 'description_short', 'version': 'version_name',
@@ -85,7 +86,7 @@ def main():
     def post(action, claim=None, **fields):
         payload = dict(scope='metadata_repair', action=action, run_id=run,
                        claim_id=claim or uuid.uuid4().hex, **fields)
-        return http.website(METADATA, payload, token, metadata=True, timeout=90, attempts=5)
+        return post_checkpoint(http, token, payload, http.deadline)
     time.sleep(int(slot) * .5)
     batches, latest = 0, None
     try:
@@ -117,12 +118,15 @@ def main():
             print('::warning::Repair has unfinished records. Rerun this manual workflow to resume; saved repairs are retained.', flush=True)
         if latest['failed'] or latest['unavailable'] or latest['partial'] or latest['unchanged']:
             print('::warning::Some fields remain unavailable from the sources. See the repair counts; missing values were not fabricated.', flush=True)
+    except CheckpointPending as exc:
+        print(f'::warning::{exc} Rerun this workflow to resume the repair queue.', flush=True)
     finally:
         if latest and os.environ.get('GITHUB_STEP_SUMMARY'):
             with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
                 summary.write('### Catalog metadata repair\n\n' + progress_line(latest) + '\n\n')
                 summary.write('Existing values are preserved. Normal collection remains paused. Rerun this workflow to resume pending work.\n')
-    print(progress_line(latest), flush=True)
+    if latest:
+        print(progress_line(latest), flush=True)
 
 
 if __name__ == '__main__':
