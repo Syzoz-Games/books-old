@@ -402,6 +402,13 @@ def review_fields(appid,data,checked_at):
  if total==0:return {}
  return {'rating':5*positive/total,'rating_count':total,'rating_source':'steam_reviews','rating_checked_at':checked_at}
 def owner_phase(tr,state,deadline,engine_seconds=0):
+ # Upcoming games must become eligible before selecting owner/rating candidates.
+ from steam_releases import refresh
+ remaining=deadline-time.monotonic()
+ if remaining>30:
+  try:refresh(tr,min(deadline-20,time.monotonic()+min(120,remaining/2)))
+  except (OSError,ValueError,RuntimeError) as error:
+   print(f'::warning::Steam release refresh deferred ({type(error).__name__}); continuing ownership enrichment.',flush=True)
  # Refill from saved records until the bounded budget ends, independent of PICS.
  # One shared timer spans every page: SteamSpy appdetails starts <= once/second.
  totals={'collected':0,'failed':0,'deferred':0};seen=set();next_request=0.0;engine_left=max(0,engine_seconds)
