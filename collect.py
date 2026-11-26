@@ -402,13 +402,6 @@ def review_fields(appid,data,checked_at):
  if total==0:return {}
  return {'rating':5*positive/total,'rating_count':total,'rating_source':'steam_reviews','rating_checked_at':checked_at}
 def owner_phase(tr,state,deadline,engine_seconds=0):
- # Upcoming games must become eligible before selecting owner/rating candidates.
- from steam_releases import refresh
- remaining=deadline-time.monotonic()
- if remaining>30:
-  try:refresh(tr,min(deadline-20,time.monotonic()+min(120,remaining/2)))
-  except (OSError,ValueError,RuntimeError) as error:
-   print(f'::warning::Steam release refresh deferred ({type(error).__name__}); continuing ownership enrichment.',flush=True)
  # Refill from saved records until the bounded budget ends, independent of PICS.
  # One shared timer spans every page: SteamSpy appdetails starts <= once/second.
  totals={'collected':0,'failed':0,'deferred':0};seen=set();next_request=0.0;engine_left=max(0,engine_seconds)
@@ -420,6 +413,12 @@ def owner_phase(tr,state,deadline,engine_seconds=0):
   candidates=[r for r in candidates if r['appid'] not in seen]
   if not candidates:break
   seen.update(r['appid'] for r in candidates)
+  # Ratings are independent of SteamSpy's stale/missing ownership response.
+  try:
+   from steam_releases import refresh_ratings
+   refresh_ratings(tr,[r['appid'] for r in candidates],deadline)
+  except (OSError,ValueError,RuntimeError) as error:
+   print(f'::warning::Steam ratings deferred ({type(error).__name__}); continuing owner estimates.',flush=True)
   engines=[]
   if engine_left>1 and deadline-time.monotonic()>2:
    pending=[dict(appid=r['appid'],type='game',name=r['name'],coming_soon=False,architectures=None) for r in candidates if r.get('engine_due') is True and isinstance(r.get('name'),str) and r['name']]
@@ -441,6 +440,7 @@ def owner_phase(tr,state,deadline,engine_seconds=0):
      with urllib.request.urlopen(url,timeout=timeout) as response:raw=response.read(1000001)
     if len(raw)>1000000:raise ValueError('Ownership response too large')
     checked_at=int(time.time());record=owner_estimates(owner_fields(appid,json.loads(raw),checked_at))
+    for key in ('rating','rating_count','rating_source','rating_checked_at'):record.pop(key,None)
     records.append(record);games.append({'package':'steam:'+str(appid),'revision':checked_at,'points':[{'observed_at':checked_at,'total_installs':record['installs'],'period':1}]})
    except urllib.error.HTTPError as error:
     failed.append(appid);code=error.code;error.close()
@@ -532,6 +532,9 @@ def main():
  state=initial()|tr.call('state');state.update(status='starting',heartbeat=int(time.time()),run_id=os.environ.get('GITHUB_RUN_ID','local')+'-'+os.environ.get('GITHUB_RUN_ATTEMPT','1'));tr.call('begin',state=state)
  client=None;started=time.monotonic();error=None;owner_budget=0 if args.local else min(args.owners_seconds,max(0,args.seconds-1));owner_remaining=owner_budget
  try:
+  if not args.local:
+   from steam_releases import refresh
+   refresh(tr,started+args.seconds-owner_budget-30)
   if owner_budget:
    before=time.monotonic();budget=owner_budget if args.enrich_only else owner_budget/2
    summary=owner_phase(tr,state,min(started+args.seconds,before+budget),args.engine_seconds if args.enrich_only else args.engine_seconds/2);owner_remaining=max(0,owner_budget-(time.monotonic()-before));print(json.dumps(dict(phase='owners',**summary)),flush=True)

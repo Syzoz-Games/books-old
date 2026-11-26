@@ -145,6 +145,8 @@ def steam_finish(m,args,plan):
 def steam_finish_saved(m,args,plan):
  tr=steam_transport(m)
  reply=tr.call('parallel-finish',run_id=plan['run_id'],generation=plan['generation'])
+ from steam_releases import refresh
+ refresh(tr,time.monotonic()+args.seconds-args.owners_seconds-60)
  if args.owners_seconds:
   state=tr.call('state');m.owner_phase(tr,state,time.monotonic()+args.owners_seconds,args.engine_seconds)
   state.update(status='checkpointed',phase='Parallel Store catalog checkpoint saved',heartbeat=int(time.time()));tr.call('finish',state=state)

@@ -43,21 +43,90 @@ def fetch_release(appid, timeout):
     return release_fields(appid, json.loads(raw), int(time.time()))
 
 
+def store_items(appids, timeout):
+    payload = {'ids': [{'appid': i} for i in appids],
+               'context': {'language': 'english', 'country_code': 'US'},
+               'data_request': {'include_release': True, 'include_reviews': True}}
+    url = 'https://api.steampowered.com/IStoreBrowseService/GetItems/v1/?' + urllib.parse.urlencode({'input_json': json.dumps(payload)})
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        document = json.load(response)
+    items = document.get('response', {}).get('store_items')
+    if not isinstance(items, list):
+        raise ValueError('Invalid Steam Store batch response')
+    return {item.get('id', item.get('appid')): item for item in items
+            if isinstance(item, dict) and item.get('success') == 1
+            and item.get('id', item.get('appid')) in appids}
+
+
+def review_fields(appid, item, checked_at):
+    summary = (item.get('reviews') or {}).get('summary_filtered')
+    if not isinstance(summary, dict):
+        return None
+    count, percent = summary.get('review_count'), summary.get('percent_positive')
+    if type(count) is not int or not 0 <= count <= 9007199254740991:
+        return None
+    if count and (type(percent) is not int or not 0 <= percent <= 100):
+        return None
+    return dict(appid=appid, rating=percent / 20 if count else None,
+                rating_count=count, rating_source='steam_store_summary', rating_checked_at=checked_at)
+
+
+def refresh_ratings(tr, appids, deadline):
+    if not appids or deadline - time.monotonic() <= 2:
+        return
+    items = store_items(appids, min(25, deadline - time.monotonic()))
+    now = int(time.time())
+    records = [review_fields(i, item, now) for i, item in items.items()]
+    records = [row for row in records if row is not None]
+    if records:
+        receipt = tr.call('ratings', records=records)
+        print(json.dumps(dict(phase='steam_ratings', **receipt)), flush=True)
+
+
 def refresh(tr, deadline, dated_only=False):
     totals = dict(checked=0, released=0, upcoming=0, failed=0)
     next_request = 0.0
-    while deadline - time.monotonic() > 5:
-        reply = tr.call('release-candidates', limit=20, dated_only=dated_only)
+    remaining_due = None
+    while deadline - time.monotonic() > 30:
+        reply = tr.call('release-candidates', limit=100, dated_only=dated_only)
         candidates = reply.get('records')
-        if not isinstance(candidates, list) or len(candidates) > 20:
+        if not isinstance(candidates, list) or len(candidates) > 100:
             raise ValueError('Invalid release candidates')
         if not candidates:
-            break
+            print(json.dumps(dict(phase='release_status', status='queue_drained', **totals)), flush=True)
+            return totals
         ids = [r.get('appid') for r in candidates if isinstance(r, dict)]
         if len(ids) != len(candidates) or len(set(ids)) != len(ids) or any(type(i) is not int or not 0 < i < 2**32 for i in ids):
             raise ValueError('Invalid release AppIDs')
-        rows, failed, stop = [], [], False
+        wait = max(0, next_request - time.monotonic())
+        if wait:
+            time.sleep(wait)
+        next_request = time.monotonic() + 1.5
+        try:
+            items = store_items(ids, min(25, deadline - time.monotonic()))
+        except (OSError, ValueError) as error:
+            print(f'::warning::Steam release batch unavailable ({type(error).__name__}); claimed work retained for retry.', flush=True)
+            tr.call('releases', records=[], failed_appids=ids)
+            break
+        rows, ratings, failed, stop = [], [], [], False
+        now = int(time.time())
         for appid in ids:
+            item = items.get(appid, {})
+            rating = review_fields(appid, item, now)
+            if rating is not None:
+                ratings.append(rating)
+            rel = item.get('release')
+            if not isinstance(rel, dict):
+                failed.append(appid)
+                continue
+            if rel.get('is_coming_soon') is True:
+                stamp = rel.get('steam_release_date')
+                stamp = stamp if type(stamp) is int and 0 < stamp < 2**32 else None
+                label = rel.get('custom_release_date_message') or (datetime.fromtimestamp(stamp, timezone.utc).strftime('%b %d, %Y') if stamp else 'Coming soon')
+                rows.append(dict(appid=appid, coming_soon=True, release_ts=stamp, release_label=label, checked_at=now))
+                continue
+            # Protobuf JSON omits false flags. Confirm launches through the
+            # explicit appdetails flag instead of guessing from an absent field.
             wait = max(0, next_request - time.monotonic())
             if deadline - time.monotonic() <= wait + 3:
                 stop = True
@@ -70,19 +139,23 @@ def refresh(tr, deadline, dated_only=False):
             except (OSError, ValueError) as error:
                 failed.append(appid)
                 code = getattr(error, 'code', None)
-                print(f'::warning::Steam release check {appid}: {type(error).__name__}' + (f' HTTP {code}' if code else '') + '; saved status unchanged.', flush=True)
+                print(f'::warning::Steam release check {appid}: {type(error).__name__}; saved status unchanged.', flush=True)
                 if code in (403, 429, 503):
                     stop = True
                     break
+        if ratings:
+            tr.call('ratings', records=ratings)
         if rows or failed:
             receipt = tr.call('releases', records=rows, failed_appids=failed)
             totals['checked'] += len(rows)
             totals['released'] += receipt['released']
             totals['upcoming'] += receipt['upcoming']
             totals['failed'] += len(failed)
-            print(json.dumps(dict(phase='release_status', **totals, remaining_due=receipt['remaining_due'])), flush=True)
+            remaining_due = receipt['remaining_due']
+            print(json.dumps(dict(phase='release_status', **totals, remaining_due=remaining_due)), flush=True)
         if stop:
             break
+    print(f'::warning::Steam release pass interrupted; remaining records are checkpointed for the next normal run (last remaining_due={remaining_due}).', flush=True)
     return totals
 
 
