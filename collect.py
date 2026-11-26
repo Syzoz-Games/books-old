@@ -14,7 +14,7 @@ class CheckpointUnavailable(RuntimeError):pass
 class NoRedirect(urllib.request.HTTPRedirectHandler):
  def redirect_request(self,*args,**kw):return None
 class Transport:
- def __init__(self,url,token,local=None):self.url=url;self.token=token;self.local=Path(local) if local else None
+ def __init__(self,url,token,local=None,retry_seconds=60,deadline=None):self.url=url;self.token=token;self.local=Path(local) if local else None;self.retry_seconds=retry_seconds;self.deadline=deadline
  def call(self,action,**kw):
   data=dict(action=action,**kw)
   if self.local:
@@ -24,10 +24,10 @@ class Transport:
     with (self.local/'batches.jsonl').open('a') as f:f.write(json.dumps(data)+'\n')
    state=kw.get('state',old);temp=p.with_suffix('.tmp');temp.write_text(json.dumps(state));temp.replace(p);return state
   req=urllib.request.Request(self.url,wire_json(data),{'Content-Type':'application/json','X-Steam-Token':self.token})
-  deadline=time.monotonic()+60;attempt=0;reason='No response'
+  deadline=min(time.monotonic()+self.retry_seconds,self.deadline or float('inf'));attempt=0;reason='No response'
   while True:
    remaining=deadline-time.monotonic()
-   if remaining<=0:raise CheckpointUnavailable(f'Catalog checkpoint {action} deferred after one minute: {reason}')
+   if remaining<=0:raise CheckpointUnavailable(f'Catalog checkpoint {action} deferred after retry budget: {reason}')
    attempt+=1
    try:
     with urllib.request.build_opener(NoRedirect).open(req,timeout=min(25,remaining)) as r:
@@ -47,9 +47,9 @@ class Transport:
    except (OSError,http.client.HTTPException) as e:
     reason=type(e).__name__
    remaining=deadline-time.monotonic()
-   if remaining<=0:raise CheckpointUnavailable(f'Catalog checkpoint {action} deferred after one minute: {reason}')
+   if remaining<=0:raise CheckpointUnavailable(f'Catalog checkpoint {action} deferred after retry budget: {reason}')
    # Retry the exact request/session/chunk, so a lost reply cannot skip data.
-   if attempt==1:print(f'::warning::Catalog checkpoint {action}: {reason}; retrying for at most one minute.',flush=True)
+   if attempt==1:print(f'::warning::Catalog checkpoint {action}: {reason}; retrying for at most {self.retry_seconds} seconds.',flush=True)
    time.sleep(min(remaining,min(12,2**min(attempt,4))+random.uniform(0,1)))
 
 def wire_json(value):

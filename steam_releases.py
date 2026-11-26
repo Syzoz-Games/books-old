@@ -3,6 +3,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 import os
+import random
 import time
 import urllib.error
 import urllib.parse
@@ -172,8 +173,11 @@ def main():
     if not 1 <= args.batch <= 100:
         parser.error('batch must be between 1 and 100')
     from collect import Transport
-    tr = Transport(os.environ.get('STEAM_SYNC_URL', 'https://syzoz.com/chart/steam-sync.php'), os.environ['STEAM_SYNC_TOKEN'])
-    print(json.dumps(refresh(tr, time.monotonic() + args.seconds, args.dated_only, args.batch)), flush=True)
+    deadline = time.monotonic() + args.seconds
+    # Spread host queue writes from matrix jobs; Steam collection stays parallel.
+    time.sleep(random.uniform(0, min(20, args.seconds / 4)))
+    tr = Transport(os.environ.get('STEAM_SYNC_URL', 'https://syzoz.com/chart/steam-sync.php'), os.environ['STEAM_SYNC_TOKEN'], retry_seconds=900, deadline=deadline)
+    print(json.dumps(refresh(tr, deadline, args.dated_only, args.batch)), flush=True)
 
 
 if __name__ == '__main__':
