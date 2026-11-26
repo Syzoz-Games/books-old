@@ -525,14 +525,14 @@ def scan_store_catalog(tr, state, deadline):
  return state
 
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--seconds',type=int,default=21600);ap.add_argument('--owners-seconds',type=int,default=300);ap.add_argument('--engine-seconds',type=int,default=60);ap.add_argument('--enrich-only',action='store_true');ap.add_argument('--batch',type=int,default=1000);ap.add_argument('--local');ap.add_argument('--scan-to',type=int,default=MAX_APP_ID);args=ap.parse_args()
+ ap=argparse.ArgumentParser();ap.add_argument('--seconds',type=int,default=21600);ap.add_argument('--owners-seconds',type=int,default=300);ap.add_argument('--engine-seconds',type=int,default=60);ap.add_argument('--enrich-only',action='store_true');ap.add_argument('--skip-release-refresh',action='store_true');ap.add_argument('--batch',type=int,default=1000);ap.add_argument('--local');ap.add_argument('--scan-to',type=int,default=MAX_APP_ID);args=ap.parse_args()
  if not 1<=args.batch<=5000 or not 1<=args.scan_to<=MAX_APP_ID or not 1<=args.seconds<=21600 or args.enrich_only and args.local or not 0<=args.owners_seconds<=600 or not 0<=args.engine_seconds<=120:raise ValueError('Invalid scan bounds or ownership budget')
  tr=Transport(os.environ.get('STEAM_SYNC_URL','https://syzoz.com/chart/steam-sync.php'),os.environ.get('STEAM_SYNC_TOKEN',''),args.local)
  if not args.local and len(tr.token)<32:raise ValueError('Missing Steam upload credential')
  state=initial()|tr.call('state');state.update(status='starting',heartbeat=int(time.time()),run_id=os.environ.get('GITHUB_RUN_ID','local')+'-'+os.environ.get('GITHUB_RUN_ATTEMPT','1'));tr.call('begin',state=state)
  client=None;started=time.monotonic();error=None;owner_budget=0 if args.local else min(args.owners_seconds,max(0,args.seconds-1));owner_remaining=owner_budget
  try:
-  if not args.local:
+  if not args.local and not args.skip_release_refresh:
    from steam_releases import refresh
    refresh(tr,started+args.seconds-owner_budget-30)
   if owner_budget:

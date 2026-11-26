@@ -35,6 +35,20 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(result['checked'],2)
         self.assertEqual(sum(c[0]=='release-candidates' for c in tr.calls),3)
 
+    def test_fifty_per_claim_repeats_until_empty(self):
+        tr=Transport([[{'appid':i} for i in range(1,51)], [{'appid':51}], []])
+        def items(ids,*a):return {i:{'release':{'is_coming_soon':True}} for i in ids}
+        with patch.object(releases,'store_items',side_effect=items),patch.object(releases.time,'sleep'):
+            result=releases.refresh(tr,time.monotonic()+100,batch_size=50)
+        self.assertEqual(result['checked'],51)
+        claims=[kw for action,kw in tr.calls if action=='release-candidates']
+        self.assertEqual([c['limit'] for c in claims],[50,50,50])
+
+    def test_rejects_oversized_claim(self):
+        tr=Transport([[{'appid':i} for i in range(1,52)]])
+        with self.assertRaises(ValueError):
+            releases.refresh(tr,time.monotonic()+100,batch_size=50)
+
     def test_reviews_zero_is_missing_score(self):
         row=releases.review_fields(1,{'reviews':{'summary_filtered':{'review_count':611,'percent_positive':96}}},100)
         self.assertEqual(row['rating'],4.8);self.assertEqual(row['rating_source'],'steam_store_summary')

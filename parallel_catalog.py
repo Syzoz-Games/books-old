@@ -145,8 +145,9 @@ def steam_finish(m,args,plan):
 def steam_finish_saved(m,args,plan):
  tr=steam_transport(m)
  reply=tr.call('parallel-finish',run_id=plan['run_id'],generation=plan['generation'])
- from steam_releases import refresh
- refresh(tr,time.monotonic()+args.seconds-args.owners_seconds-60)
+ if not args.skip_release_refresh:
+  from steam_releases import refresh
+  refresh(tr,time.monotonic()+args.seconds-args.owners_seconds-60)
  if args.owners_seconds:
   state=tr.call('state');m.owner_phase(tr,state,time.monotonic()+args.owners_seconds,args.engine_seconds)
   state.update(status='checkpointed',phase='Parallel Store catalog checkpoint saved',heartbeat=int(time.time()));tr.call('finish',state=state)
@@ -158,6 +159,7 @@ def main():
  parser.add_argument('--plan',default='work-plan.json');parser.add_argument('--worker',type=int,default=0)
  parser.add_argument('--seconds',type=int,default=21600);parser.add_argument('--mode',choices=['all','sitemaps','metadata','release_dates'],default='all')
  parser.add_argument('--metadata-batches',type=int,default=20);parser.add_argument('--owners-seconds',type=int,default=300);parser.add_argument('--engine-seconds',type=int,default=60)
+ parser.add_argument('--skip-release-refresh',action='store_true',help='Release matrix already processed the shared queue')
  args=parser.parse_args()
  if not 60<=args.seconds<=21600 or not 0<=args.worker<60 or not 0<=args.metadata_batches<=200 or not 0<=args.owners_seconds<=600 or not 0<=args.engine_seconds<=120:raise ValueError('Invalid worker bounds')
  module=importlib.import_module('apkpure.admin_mobile' if args.provider=='mobile' else 'collect')

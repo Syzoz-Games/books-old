@@ -83,17 +83,19 @@ def refresh_ratings(tr, appids, deadline):
         print(json.dumps(dict(phase='steam_ratings', **receipt)), flush=True)
 
 
-def refresh(tr, deadline, dated_only=False):
+def refresh(tr, deadline, dated_only=False, batch_size=100):
+    if type(batch_size) is not int or not 1 <= batch_size <= 100:
+        raise ValueError("batch_size must be between 1 and 100")
     totals = dict(checked=0, released=0, upcoming=0, failed=0)
     next_request = 0.0
     remaining_due = None
     while deadline - time.monotonic() > 30:
-        reply = tr.call('release-candidates', limit=100, dated_only=dated_only)
+        reply = tr.call('release-candidates', limit=batch_size, dated_only=dated_only)
         candidates = reply.get('records')
-        if not isinstance(candidates, list) or len(candidates) > 100:
+        if not isinstance(candidates, list) or len(candidates) > batch_size:
             raise ValueError('Invalid release candidates')
         if not candidates:
-            print(json.dumps(dict(phase='release_status', status='queue_drained', **totals)), flush=True)
+            print(json.dumps(dict(phase='release_status', status='no_unclaimed_work', **totals)), flush=True)
             return totals
         ids = [r.get('appid') for r in candidates if isinstance(r, dict)]
         if len(ids) != len(candidates) or len(set(ids)) != len(ids) or any(type(i) is not int or not 0 < i < 2**32 for i in ids):
@@ -163,12 +165,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--seconds', type=int, default=1200)
     parser.add_argument('--dated-only', action='store_true')
+    parser.add_argument('--batch', type=int, default=50, help='Games per atomic server claim; repeat until no work remains')
     args = parser.parse_args()
-    if not 10 <= args.seconds <= 3600:
-        parser.error('seconds must be between 10 and 3600')
+    if not 60 <= args.seconds <= 21300:
+        parser.error('seconds must be between 60 and 21300')
+    if not 1 <= args.batch <= 100:
+        parser.error('batch must be between 1 and 100')
     from collect import Transport
     tr = Transport(os.environ.get('STEAM_SYNC_URL', 'https://syzoz.com/chart/steam-sync.php'), os.environ['STEAM_SYNC_TOKEN'])
-    print(json.dumps(refresh(tr, time.monotonic() + args.seconds, args.dated_only)), flush=True)
+    print(json.dumps(refresh(tr, time.monotonic() + args.seconds, args.dated_only, args.batch)), flush=True)
 
 
 if __name__ == '__main__':
