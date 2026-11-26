@@ -1,0 +1,37 @@
+name: Refresh upcoming Steam releases
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Maximum runtime in seconds (10-3600)
+        default: '1800'
+        type: string
+      dated_only:
+        description: Only games whose saved planned release date has passed
+        default: true
+        type: boolean
+permissions:
+  contents: read
+concurrency:
+  group: steam-release-status
+  cancel-in-progress: false
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Verify release status of saved upcoming games
+        env:
+          STEAM_SYNC_TOKEN: ${{ secrets.STEAM_SYNC_TOKEN }}
+          STEAM_SYNC_URL: https://syzoz.com/chart/steam-sync.php
+          SECONDS_LIMIT: ${{ inputs.seconds }}
+          DATED_ONLY: ${{ inputs.dated_only }}
+        run: |
+          args=(--seconds "$SECONDS_LIMIT")
+          if [ "$DATED_ONLY" = true ]; then args+=(--dated-only); fi
+          python steam_releases.py "${args[@]}"
