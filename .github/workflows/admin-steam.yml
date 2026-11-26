@@ -100,7 +100,7 @@ jobs:
           SYNC_SECONDS: ${{ inputs.seconds || '21300' }}
           OWNERS_SECONDS: ${{ inputs.owners_seconds || '300' }}
           ENGINE_SECONDS: ${{ inputs.engine_seconds || '60' }}
-        run: python parallel_catalog.py finish --provider steam --owners-seconds "$OWNERS_SECONDS" --engine-seconds "$ENGINE_SECONDS"
+        run: python parallel_catalog.py finish --provider steam --seconds "$SYNC_SECONDS" --owners-seconds "$OWNERS_SECONDS" --engine-seconds "$ENGINE_SECONDS"
   collect:
     name: Saved-game enrichment
     if: ${{ inputs.mode == 'enrich' }}
